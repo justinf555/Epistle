@@ -34,6 +34,18 @@ check:
 test:
 	$(FLATPAK_RUN) -c '$(SDK_INIT) && cargo test'
 
+# Integration tests — need session D-Bus for GOA, EDS, etc.
+FLATPAK_RUN_DBUS = flatpak run --share=network \
+	--socket=session-bus \
+	--filesystem=$(CURDIR) \
+	--filesystem=$(HOME)/.cargo/registry:create \
+	--filesystem=$(HOME)/.cargo/git:create \
+	--env=CARGO_HOME=/tmp/flatpak-cargo \
+	--command=bash org.gnome.Sdk//50
+
+integration-test:
+	$(FLATPAK_RUN_DBUS) -c '$(SDK_INIT) && cargo test -- --ignored'
+
 # ── Linting & Analysis ──────────────────────────────────────────────────────
 
 lint:

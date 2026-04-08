@@ -18,17 +18,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-mod app_event;
 mod application;
-mod commands;
 mod config;
-mod engine;
-mod event_bus;
-mod events;
-mod goa;
-mod sync;
-mod threading;
-mod traits;
 mod ui;
 
 use self::application::EpistleApplication;
