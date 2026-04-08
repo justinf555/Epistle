@@ -1,24 +1,4 @@
-/* window.rs
- *
- * Copyright 2026 Unknown
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- *
- * SPDX-License-Identifier: GPL-3.0-or-later
- */
-
-use gtk::prelude::*;
+use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 
@@ -26,11 +6,18 @@ mod imp {
     use super::*;
 
     #[derive(Debug, Default, gtk::CompositeTemplate)]
-    #[template(resource = "/io/github/justinf555/Epistle/window.ui")]
+    #[template(resource = "/io/github/justinf555/Epistle/ui/window.ui")]
     pub struct EpistleWindow {
-        // Template widgets
         #[template_child]
-        pub label: TemplateChild<gtk::Label>,
+        pub toast_overlay: TemplateChild<adw::ToastOverlay>,
+        #[template_child]
+        pub outer_split: TemplateChild<adw::OverlaySplitView>,
+        #[template_child]
+        pub inner_split: TemplateChild<adw::NavigationSplitView>,
+        #[template_child]
+        pub sidebar_toolbar: TemplateChild<adw::ToolbarView>,
+        #[template_child]
+        pub sidebar_toggle: TemplateChild<gtk::ToggleButton>,
     }
 
     #[glib::object_subclass]
@@ -48,7 +35,15 @@ mod imp {
         }
     }
 
-    impl ObjectImpl for EpistleWindow {}
+    impl ObjectImpl for EpistleWindow {
+        fn constructed(&self) {
+            self.parent_constructed();
+            let window = self.obj();
+            window.setup_sidebar();
+            window.setup_sidebar_toggle();
+        }
+    }
+
     impl WidgetImpl for EpistleWindow {}
     impl WindowImpl for EpistleWindow {}
     impl ApplicationWindowImpl for EpistleWindow {}
@@ -67,5 +62,41 @@ impl EpistleWindow {
         glib::Object::builder()
             .property("application", application)
             .build()
+    }
+
+    fn setup_sidebar(&self) {
+        let sidebar = adw::Sidebar::new();
+
+        let folders = adw::SidebarSection::new();
+        for (label, icon) in &[
+            ("Inbox", "mail-inbox-symbolic"),
+            ("Sent", "mail-send-symbolic"),
+            ("Drafts", "accessories-text-editor-symbolic"),
+            ("Archive", "folder-symbolic"),
+            ("Trash", "user-trash-symbolic"),
+        ] {
+            let item = adw::SidebarItem::builder()
+                .title(*label)
+                .icon_name(*icon)
+                .build();
+            folders.append(item);
+        }
+        sidebar.append(folders);
+
+        self.imp().sidebar_toolbar.set_content(Some(&sidebar));
+    }
+
+    fn setup_sidebar_toggle(&self) {
+        let imp = self.imp();
+        let split = imp.outer_split.clone();
+        imp.sidebar_toggle.connect_toggled(move |btn| {
+            split.set_show_sidebar(btn.is_active());
+        });
+
+        let toggle = imp.sidebar_toggle.clone();
+        imp.outer_split
+            .connect_show_sidebar_notify(move |split| {
+                toggle.set_active(split.shows_sidebar());
+            });
     }
 }

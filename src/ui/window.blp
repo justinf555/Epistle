@@ -1,0 +1,97 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $EpistleWindow : Adw.ApplicationWindow {
+  title: _("Epistle");
+  default-width: 1000;
+  default-height: 700;
+
+  content: Adw.ToastOverlay toast_overlay {
+    Adw.OverlaySplitView outer_split {
+      min-sidebar-width: 210;
+      max-sidebar-width: 280;
+
+      sidebar: Adw.ToolbarView sidebar_toolbar {
+        [top]
+        Adw.HeaderBar {
+          show-title: false;
+
+          [start]
+          Gtk.Button {
+            icon-name: "mail-message-new-symbolic";
+            tooltip-text: _("Compose");
+          }
+
+          [end]
+          Gtk.MenuButton {
+            primary: true;
+            icon-name: "open-menu-symbolic";
+            tooltip-text: _("Main Menu");
+            menu-model: primary_menu;
+          }
+        }
+      };
+
+      content: Adw.NavigationSplitView inner_split {
+        min-sidebar-width: 280;
+        max-sidebar-width: 400;
+
+        sidebar: Adw.NavigationPage {
+          title: _("Messages");
+
+          child: Adw.ToolbarView {
+            [top]
+            Adw.HeaderBar {
+              [start]
+              Gtk.ToggleButton sidebar_toggle {
+                icon-name: "sidebar-show-symbolic";
+                tooltip-text: _("Toggle Sidebar");
+                active: true;
+              }
+            }
+
+            content: Adw.StatusPage message_list_empty {
+              icon-name: "mail-inbox-symbolic";
+              title: _("No Messages");
+              description: _("Select a folder to view messages.");
+            };
+          };
+        };
+
+        content: Adw.NavigationPage {
+          title: _("Message");
+
+          child: Adw.ToolbarView {
+            [top]
+            Adw.HeaderBar {}
+
+            content: Adw.StatusPage content_empty {
+              icon-name: "mail-read-symbolic";
+              title: _("Select a Message");
+              description: _("Choose a message from the list to read it.");
+            };
+          };
+        };
+      };
+    }
+  };
+}
+
+menu primary_menu {
+  section {
+    item {
+      label: _("_Preferences");
+      action: "app.preferences";
+    }
+
+    item {
+      label: _("_Keyboard Shortcuts");
+      action: "app.shortcuts";
+    }
+
+    item {
+      label: _("_About Epistle");
+      action: "app.about";
+    }
+  }
+}
