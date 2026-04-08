@@ -1,0 +1,98 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Page-1" id="5SfWzwP_vCdGtnZR-Uem">
+    <mxGraphModel dx="1161" dy="911" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- External Services -->
+        <mxCell id="ext_goa" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;dashed=1;" value="GOA (D-Bus)" vertex="1">
+          <mxGeometry height="40" width="100" x="170" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="ext_imap" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;dashed=1;" value="IMAP Servers" vertex="1">
+          <mxGeometry height="40" width="100" x="330" y="80" as="geometry" />
+        </mxCell>
+
+        <!-- Sync Service -->
+        <mxCell id="LNnmyi4zDFDXN3ba2-EG-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" value="Sync Service&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;(sync/)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="60" width="160" x="220" y="210" as="geometry" />
+        </mxCell>
+
+        <!-- Mail Engine -->
+        <mxCell id="LNnmyi4zDFDXN3ba2-EG-2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" value="Mail Engine&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;(engine/)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="60" width="160" x="220" y="370" as="geometry" />
+        </mxCell>
+
+        <!-- GNOME/GTK Frontend -->
+        <mxCell id="LNnmyi4zDFDXN3ba2-EG-3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" value="GNOME / GTK&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;(ui/)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="60" width="160" x="220" y="530" as="geometry" />
+        </mxCell>
+
+        <!-- SQLite -->
+        <mxCell id="sqlite" parent="1" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=8;fillColor=#f5f5f5;strokeColor=#666666;fontColor=#333333;" value="SQLite&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;(WAL mode)&lt;/font&gt;" vertex="1">
+          <mxGeometry height="50" width="80" x="440" y="375" as="geometry" />
+        </mxCell>
+
+        <!-- EventBus (vertical bar) -->
+        <mxCell id="eventbus" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=middle;" value="E&lt;br&gt;v&lt;br&gt;e&lt;br&gt;n&lt;br&gt;t&lt;br&gt;B&lt;br&gt;u&lt;br&gt;s" vertex="1">
+          <mxGeometry height="380" width="40" x="100" y="210" as="geometry" />
+        </mxCell>
+
+        <!-- External → Sync arrows -->
+        <mxCell id="edge_goa_sync" edge="1" parent="1" source="ext_goa" target="LNnmyi4zDFDXN3ba2-EG-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#6c8ebf;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_imap_sync" edge="1" parent="1" source="ext_imap" target="LNnmyi4zDFDXN3ba2-EG-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=#6c8ebf;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- Sync → Mail Engine (domain writes) -->
+        <mxCell id="LNnmyi4zDFDXN3ba2-EG-5" edge="1" parent="1" source="LNnmyi4zDFDXN3ba2-EG-1" target="LNnmyi4zDFDXN3ba2-EG-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label_sync_write" parent="LNnmyi4zDFDXN3ba2-EG-5" style="edgeLabel;html=1;align=left;verticalAlign=middle;resizable=0;points=[];fontSize=9;" value="domain writes" vertex="1" connectable="0">
+          <mxGeometry x="-0.2" relative="1" as="geometry">
+            <mxPoint x="-70" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Mail Engine → GTK (events) -->
+        <mxCell id="LNnmyi4zDFDXN3ba2-EG-8" edge="1" parent="1" source="LNnmyi4zDFDXN3ba2-EG-2" target="LNnmyi4zDFDXN3ba2-EG-3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label_events" parent="LNnmyi4zDFDXN3ba2-EG-8" style="edgeLabel;html=1;align=left;verticalAlign=middle;resizable=0;points=[];fontSize=9;" value="events" vertex="1" connectable="0">
+          <mxGeometry x="-0.2" relative="1" as="geometry">
+            <mxPoint x="-40" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- GTK → Mail Engine (reads) -->
+        <mxCell id="LNnmyi4zDFDXN3ba2-EG-9" edge="1" parent="1" source="LNnmyi4zDFDXN3ba2-EG-3" target="LNnmyi4zDFDXN3ba2-EG-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.75;exitY=0;exitDx=0;exitDy=0;entryX=0.75;entryY=1;entryDx=0;entryDy=0;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="label_reads" parent="LNnmyi4zDFDXN3ba2-EG-9" style="edgeLabel;html=1;align=right;verticalAlign=middle;resizable=0;points=[];fontSize=9;" value="reads" vertex="1" connectable="0">
+          <mxGeometry x="0.2" relative="1" as="geometry">
+            <mxPoint x="30" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Mail Engine → SQLite -->
+        <mxCell id="edge_engine_sqlite" edge="1" parent="1" source="LNnmyi4zDFDXN3ba2-EG-2" target="sqlite" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- EventBus connections -->
+        <mxCell id="edge_bus_sync" edge="1" parent="1" source="eventbus" target="LNnmyi4zDFDXN3ba2-EG-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.05;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#b85450;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_bus_engine" edge="1" parent="1" source="eventbus" target="LNnmyi4zDFDXN3ba2-EG-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.45;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#b85450;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_bus_gtk" edge="1" parent="1" source="eventbus" target="LNnmyi4zDFDXN3ba2-EG-3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.87;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#b85450;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
