@@ -35,8 +35,8 @@ impl SyncEngine {
         }))
     }
 
-    /// Subscribe to the event bus. Reacts to lifecycle events.
-    pub fn subscribe(self: &Arc<Self>) {
+    /// Start the sync service. Subscribes to lifecycle events and reacts.
+    pub fn start(self: &Arc<Self>) {
         let engine = Arc::clone(self);
         crate::event_bus::subscribe(move |event| {
             if matches!(event, AppEvent::AppStarted) {

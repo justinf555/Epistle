@@ -54,7 +54,7 @@ fn main() -> glib::ExitCode {
         engine.accounts(),
         engine.folders(),
     )).expect("Failed to initialize sync engine");
-    sync.subscribe();
+    sync.start();
 
     // Pass engine to GTK app
     let app = EpistleApplication::new(
