@@ -2,10 +2,9 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::glib;
 
-use std::collections::HashMap;
-
-use epistle::engine::db::accounts::AccountRow;
+use epistle::app_event::AppEvent;
 use epistle::engine::db::folders::FolderRow;
+use epistle::event_bus::EventBus;
 
 mod imp {
     use super::*;
@@ -104,31 +103,63 @@ impl EpistleSidebar {
         glib::Object::builder().build()
     }
 
-    /// Add per-account sections to the sidebar with real folder names.
-    pub fn populate_accounts(
-        &self,
-        accounts: &[AccountRow],
-        folders: &HashMap<String, Vec<FolderRow>>,
-    ) {
+    /// Subscribe to the event bus for account and folder updates.
+    pub fn subscribe_events(&self, bus: &EventBus) {
+        let sidebar_weak = self.downgrade();
+
+        bus.subscribe(move |event| {
+            let Some(sidebar) = sidebar_weak.upgrade() else {
+                return;
+            };
+            match event {
+                AppEvent::AccountsChanged { accounts } => {
+                    sidebar.on_accounts_changed(accounts);
+                }
+                AppEvent::FoldersChanged {
+                    email_address,
+                    folders,
+                    ..
+                } => {
+                    sidebar.on_folders_changed(email_address, folders);
+                }
+            }
+        });
+    }
+
+    fn on_accounts_changed(&self, accounts: &[epistle::engine::db::accounts::AccountRow]) {
         let sidebar = self.imp().sidebar.get().expect("sidebar initialized");
 
+        // Add empty sections for each account (folders arrive later)
         for account in accounts {
             let section = adw::SidebarSection::new();
             section.set_title(Some(&account.email_address));
+            sidebar.append(section);
+        }
+    }
 
-            if let Some(account_folders) = folders.get(&account.goa_id) {
-                for folder in account_folders {
+    fn on_folders_changed(&self, email_address: &str, folders: &[FolderRow]) {
+        let sidebar = self.imp().sidebar.get().expect("sidebar initialized");
+
+        // Find the section for this account by title
+        let sections = sidebar.sections();
+        for i in 0..sections.n_items() {
+            let Some(section) = sidebar.section(i) else {
+                continue;
+            };
+            if section.title().as_deref() == Some(email_address) {
+                section.remove_all();
+                for folder in folders {
                     let icon = icon_for_role(folder.role.as_deref());
-                    let display_name = display_name_for_folder(&folder.name, folder.role.as_deref());
+                    let display_name =
+                        display_name_for_folder(&folder.name, folder.role.as_deref());
                     let item = adw::SidebarItem::builder()
                         .title(&display_name)
                         .icon_name(icon)
                         .build();
                     section.append(item);
                 }
+                return;
             }
-
-            sidebar.append(section);
         }
     }
 }
@@ -155,7 +186,6 @@ fn display_name_for_folder(name: &str, role: Option<&str>) -> String {
         Some("trash") => "Trash".to_string(),
         Some("junk") => "Junk".to_string(),
         _ => {
-            // For custom folders like "[Gmail]/All Mail", show just the last component
             name.rsplit_once('/')
                 .or_else(|| name.rsplit_once('.'))
                 .map(|(_, last)| last.to_string())

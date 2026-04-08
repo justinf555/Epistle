@@ -25,7 +25,9 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 
+use epistle::app_event::AppEvent;
 use epistle::engine::db::Database;
+use epistle::event_bus::{EventBus, EventSender};
 use epistle::goa::GoaClient;
 
 use crate::config::VERSION;
@@ -38,6 +40,7 @@ mod imp {
     pub struct EpistleApplication {
         pub(super) database: OnceCell<Database>,
         pub(super) goa_client: OnceCell<GoaClient>,
+        pub(super) event_bus: OnceCell<EventBus>,
     }
 
     #[glib::object_subclass]
@@ -59,8 +62,17 @@ mod imp {
     impl ApplicationImpl for EpistleApplication {
         fn activate(&self) {
             let application = self.obj();
+
+            // Create the event bus once, before the window
+            if self.event_bus.get().is_none() {
+                let bus = EventBus::new();
+                self.event_bus.set(bus).expect("event_bus set once");
+            }
+            let bus = self.event_bus.get().unwrap();
+
             let window = application.active_window().unwrap_or_else(|| {
                 let window = EpistleWindow::new(&*application);
+                window.subscribe_events(bus);
                 window.upcast()
             });
             window.present();
@@ -70,9 +82,10 @@ mod imp {
                 return;
             }
 
+            let sender = bus.sender();
             let app = application.clone();
             glib::MainContext::default().spawn_local(async move {
-                if let Err(e) = app.init_engine().await {
+                if let Err(e) = app.init_engine(sender).await {
                     eprintln!("Engine initialization failed: {e}");
                 }
             });
@@ -98,7 +111,7 @@ impl EpistleApplication {
             .build()
     }
 
-    async fn init_engine(&self) -> anyhow::Result<()> {
+    async fn init_engine(&self, sender: EventSender) -> anyhow::Result<()> {
         let db_path = glib::user_data_dir().join("epistle").join("mail.db");
         let db = Database::open(&db_path).await?;
 
@@ -123,6 +136,12 @@ impl EpistleApplication {
             eprintln!("  • {} ({})", account.email_address, account.provider_name);
         }
 
+        // Notify sidebar of discovered accounts (shows sections before IMAP)
+        let account_rows = db.list_active_accounts().await?;
+        sender.send(AppEvent::AccountsChanged {
+            accounts: account_rows,
+        });
+
         // Discover IMAP folders for each account
         for account in &accounts {
             match goa.get_imap_auth(&account.goa_id).await {
@@ -143,6 +162,14 @@ impl EpistleApplication {
                                 folders.len(),
                                 account.email_address
                             );
+
+                            // Notify sidebar of folders for this account
+                            let folder_rows = db.list_folders(&account.goa_id).await?;
+                            sender.send(AppEvent::FoldersChanged {
+                                account_id: account.goa_id.clone(),
+                                email_address: account.email_address.clone(),
+                                folders: folder_rows,
+                            });
                         }
                         Err(e) => {
                             eprintln!(
@@ -158,19 +185,6 @@ impl EpistleApplication {
                         account.email_address
                     );
                 }
-            }
-        }
-
-        // Populate sidebar with per-account sections and real folders
-        let account_rows = db.list_active_accounts().await?;
-        let mut folder_map = std::collections::HashMap::new();
-        for account_row in &account_rows {
-            let folders = db.list_folders(&account_row.goa_id).await?;
-            folder_map.insert(account_row.goa_id.clone(), folders);
-        }
-        if let Some(window) = self.active_window() {
-            if let Some(window) = window.downcast_ref::<EpistleWindow>() {
-                window.sidebar().populate_accounts(&account_rows, &folder_map);
             }
         }
 

@@ -2,6 +2,8 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 
+use epistle::event_bus::EventBus;
+
 use super::sidebar::EpistleSidebar;
 
 mod imp {
@@ -68,6 +70,11 @@ impl EpistleWindow {
 
     pub fn sidebar(&self) -> &EpistleSidebar {
         self.imp().sidebar.get().expect("sidebar initialized")
+    }
+
+    /// Wire the sidebar (and future components) to the event bus.
+    pub fn subscribe_events(&self, bus: &EventBus) {
+        self.sidebar().subscribe_events(bus);
     }
 
     fn setup_sidebar(&self) {
