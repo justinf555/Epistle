@@ -2,6 +2,8 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 
+use super::sidebar::EpistleSidebar;
+
 mod imp {
     use super::*;
 
@@ -15,9 +17,9 @@ mod imp {
         #[template_child]
         pub inner_split: TemplateChild<adw::NavigationSplitView>,
         #[template_child]
-        pub sidebar_toolbar: TemplateChild<adw::ToolbarView>,
-        #[template_child]
         pub sidebar_toggle: TemplateChild<gtk::ToggleButton>,
+
+        pub(super) sidebar: std::cell::OnceCell<EpistleSidebar>,
     }
 
     #[glib::object_subclass]
@@ -64,26 +66,17 @@ impl EpistleWindow {
             .build()
     }
 
+    pub fn sidebar(&self) -> &EpistleSidebar {
+        self.imp().sidebar.get().expect("sidebar initialized")
+    }
+
     fn setup_sidebar(&self) {
-        let sidebar = adw::Sidebar::new();
-
-        let folders = adw::SidebarSection::new();
-        for (label, icon) in &[
-            ("Inbox", "mail-inbox-symbolic"),
-            ("Sent", "mail-send-symbolic"),
-            ("Drafts", "accessories-text-editor-symbolic"),
-            ("Archive", "folder-symbolic"),
-            ("Trash", "user-trash-symbolic"),
-        ] {
-            let item = adw::SidebarItem::builder()
-                .title(*label)
-                .icon_name(*icon)
-                .build();
-            folders.append(item);
-        }
-        sidebar.append(folders);
-
-        self.imp().sidebar_toolbar.set_content(Some(&sidebar));
+        let sidebar = EpistleSidebar::new();
+        self.imp().outer_split.set_sidebar(Some(&sidebar));
+        self.imp()
+            .sidebar
+            .set(sidebar)
+            .expect("sidebar set once");
     }
 
     fn setup_sidebar_toggle(&self) {
