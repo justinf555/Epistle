@@ -1,11 +1,26 @@
 pkgdatadir = get_option('prefix') / get_option('datadir') / meson.project_name()
 gnome = import('gnome')
 
+blueprints = custom_target(
+  'blueprints',
+  input: files(
+    'ui/window.blp',
+    'shortcuts-dialog.blp',
+  ),
+  output: '.',
+  command: [
+    find_program('blueprint-compiler'),
+    'batch-compile', '@OUTPUT@', '@CURRENT_SOURCE_DIR@',
+    '@INPUT@',
+  ],
+)
+
 gnome.compile_resources('epistle',
   'epistle.gresource.xml',
   gresource_bundle: true,
   install: true,
   install_dir: pkgdatadir,
+  dependencies: blueprints,
 )
 
 conf = configuration_data()
