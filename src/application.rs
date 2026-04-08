@@ -34,20 +34,10 @@ use crate::EpistleWindow;
 mod imp {
     use super::*;
 
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     pub struct EpistleApplication {
         pub(super) engine: OnceCell<MailEngine>,
         pub(super) activated: std::cell::Cell<bool>,
-    }
-
-    // MailEngine is not Debug, so implement manually
-    impl std::fmt::Debug for EpistleApplication {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("EpistleApplication")
-                .field("engine", &self.engine.get().map(|_| "MailEngine"))
-                .field("activated", &self.activated)
-                .finish()
-        }
     }
 
     #[glib::object_subclass]

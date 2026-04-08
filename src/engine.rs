@@ -28,6 +28,12 @@ pub struct MailEngine {
     folders: Arc<dyn MailFolders>,
 }
 
+impl std::fmt::Debug for MailEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailEngine").finish_non_exhaustive()
+    }
+}
+
 impl MailEngine {
     /// Open the database, run migrations, and create trait implementations.
     pub async fn open() -> anyhow::Result<Self> {
