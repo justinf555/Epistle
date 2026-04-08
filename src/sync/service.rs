@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use gtk::glib;
-
 use crate::app_event::AppEvent;
 use crate::engine::traits::accounts::{Account, MailAccounts};
 use crate::engine::traits::folders::{Folder, MailFolders};
@@ -37,15 +35,12 @@ impl SyncEngine {
     }
 
     /// Subscribe to the event bus. Reacts to lifecycle events.
-    ///
-    /// Uses the free `event_bus::subscribe` function so this can be called
-    /// without a `&EventBus` reference (e.g. from within an async block).
     pub fn subscribe(self: &Arc<Self>) {
         let engine = Arc::clone(self);
         crate::event_bus::subscribe(move |event| {
             if matches!(event, AppEvent::AppStarted) {
                 let engine = Arc::clone(&engine);
-                glib::MainContext::default().spawn_local(async move {
+                tokio::spawn(async move {
                     if let Err(e) = engine.run_initial_sync().await {
                         eprintln!("Initial sync failed: {e}");
                     }
@@ -73,15 +68,35 @@ impl SyncEngine {
             eprintln!("  • {} ({})", account.email_address, account.provider_name);
         }
 
-        // Persist accounts — MailEngine emits AccountsChanged
+        // Persist accounts — MailEngine emits AccountsChanged if data changed
         self.accounts.sync_accounts(&domain_accounts).await?;
 
-        // Discover IMAP folders for each account
-        for (account, goa_account) in domain_accounts.iter().zip(goa_accounts.iter()) {
-            match self.goa.lock().await.get_imap_auth(&account.goa_id).await {
-                Ok(auth) => {
-                    match crate::sync::imap::discover_folders(&goa_account.imap_config, &auth).await
-                    {
+        // Get IMAP credentials for all accounts (requires GOA lock)
+        let mut imap_tasks = Vec::new();
+        {
+            let goa = self.goa.lock().await;
+            for (account, goa_account) in domain_accounts.iter().zip(goa_accounts.iter()) {
+                match goa.get_imap_auth(&account.goa_id).await {
+                    Ok(auth) => {
+                        imap_tasks.push((account.clone(), goa_account.imap_config.clone(), auth));
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "  Failed to get IMAP credentials for {}: {e}",
+                            account.email_address
+                        );
+                    }
+                }
+            }
+        }
+
+        // Discover folders in parallel — each IMAP connection is independent
+        let futures: Vec<_> = imap_tasks
+            .into_iter()
+            .map(|(account, config, auth)| {
+                let folders_impl = Arc::clone(&self.folders);
+                async move {
+                    match crate::sync::imap::discover_folders(&config, &auth).await {
                         Ok(imap_folders) => {
                             let folders: Vec<Folder> =
                                 imap_folders.iter().map(imap_to_folder).collect();
@@ -90,8 +105,12 @@ impl SyncEngine {
                                 folders.len(),
                                 account.email_address
                             );
-                            // Persist folders — MailEngine emits FoldersChanged
-                            self.folders.sync_folders(account, &folders).await?;
+                            if let Err(e) = folders_impl.sync_folders(&account, &folders).await {
+                                eprintln!(
+                                    "  Failed to persist folders for {}: {e}",
+                                    account.email_address
+                                );
+                            }
                         }
                         Err(e) => {
                             eprintln!(
@@ -101,14 +120,10 @@ impl SyncEngine {
                         }
                     }
                 }
-                Err(e) => {
-                    eprintln!(
-                        "  Failed to get IMAP credentials for {}: {e}",
-                        account.email_address
-                    );
-                }
-            }
-        }
+            })
+            .collect();
+
+        futures::future::join_all(futures).await;
 
         Ok(())
     }

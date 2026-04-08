@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use crate::app_event::AppEvent;
+use crate::engine::db::accounts::AccountFields;
 use crate::engine::db::Database;
 use crate::engine::traits::accounts::{Account, MailAccounts};
 use crate::event_bus::EventSender;
@@ -22,26 +23,29 @@ impl MailAccountsImpl {
 #[async_trait]
 impl MailAccounts for MailAccountsImpl {
     async fn sync_accounts(&self, accounts: &[Account]) -> anyhow::Result<()> {
-        for account in accounts {
-            self.db
-                .upsert_account_fields(
-                    &account.goa_id,
-                    &account.provider_type,
-                    &account.email_address,
-                    account.display_name.as_deref(),
-                    &account.imap_host,
-                    account.imap_port,
-                    &account.imap_tls_mode,
-                    account.smtp_host.as_deref(),
-                    account.smtp_port,
-                    account.smtp_tls_mode.as_deref(),
-                )
-                .await?;
-        }
+        let fields: Vec<AccountFields<'_>> = accounts
+            .iter()
+            .map(|a| AccountFields {
+                goa_id: &a.goa_id,
+                provider_type: &a.provider_type,
+                email_address: &a.email_address,
+                display_name: a.display_name.as_deref(),
+                imap_host: &a.imap_host,
+                imap_port: a.imap_port,
+                imap_tls_mode: &a.imap_tls_mode,
+                smtp_host: a.smtp_host.as_deref(),
+                smtp_port: a.smtp_port,
+                smtp_tls_mode: a.smtp_tls_mode.as_deref(),
+            })
+            .collect();
 
-        self.sender.send(AppEvent::AccountsChanged {
-            accounts: accounts.to_vec(),
-        });
+        let changed = self.db.bulk_upsert_accounts(&fields).await?;
+
+        if changed {
+            self.sender.send(AppEvent::AccountsChanged {
+                accounts: accounts.to_vec(),
+            });
+        }
 
         Ok(())
     }
