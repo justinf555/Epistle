@@ -3,8 +3,9 @@ use adw::subclass::prelude::*;
 use gtk::glib;
 
 use epistle::app_event::AppEvent;
-use epistle::engine::db::folders::FolderRow;
 use epistle::event_bus::EventBus;
+use epistle::engine::traits::accounts::Account;
+use epistle::engine::traits::folders::Folder;
 
 mod imp {
     use super::*;
@@ -122,11 +123,12 @@ impl EpistleSidebar {
                 } => {
                     sidebar.on_folders_changed(email_address, folders);
                 }
+                _ => {}
             }
         });
     }
 
-    fn on_accounts_changed(&self, accounts: &[epistle::engine::db::accounts::AccountRow]) {
+    fn on_accounts_changed(&self, accounts: &[Account]) {
         let sidebar = self.imp().sidebar.get().expect("sidebar initialized");
 
         // Add empty sections for each account (folders arrive later)
@@ -137,7 +139,7 @@ impl EpistleSidebar {
         }
     }
 
-    fn on_folders_changed(&self, email_address: &str, folders: &[FolderRow]) {
+    fn on_folders_changed(&self, email_address: &str, folders: &[Folder]) {
         let sidebar = self.imp().sidebar.get().expect("sidebar initialized");
 
         // Find the section for this account by title

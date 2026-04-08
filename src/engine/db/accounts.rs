@@ -1,5 +1,3 @@
-use crate::goa::types::{GoaMailAccount, TlsMode};
-
 use super::{Database, DbError};
 
 /// A row from the accounts table.
@@ -23,15 +21,23 @@ impl Database {
         Ok(rows)
     }
 
-    /// Insert or update an account from GOA discovery.
-    /// Preserves `created_at` and `last_sync` on conflict.
-    pub async fn upsert_account(&self, account: &GoaMailAccount) -> Result<(), DbError> {
-        let provider_type = account.provider_type.as_goa_str();
-        let imap_tls = tls_mode_to_str(account.imap_config.tls_mode);
-        let smtp_host = account.smtp_config.as_ref().map(|c| c.host.as_str());
-        let smtp_port = account.smtp_config.as_ref().map(|c| c.port as i32);
-        let smtp_tls = account.smtp_config.as_ref().map(|c| tls_mode_to_str(c.tls_mode));
-
+    /// Insert or update an account using flat domain fields.
+    ///
+    /// Used by the engine trait layer which works with domain types, not GOA types.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_account_fields(
+        &self,
+        goa_id: &str,
+        provider_type: &str,
+        email_address: &str,
+        display_name: Option<&str>,
+        imap_host: &str,
+        imap_port: u16,
+        imap_tls_mode: &str,
+        smtp_host: Option<&str>,
+        smtp_port: Option<u16>,
+        smtp_tls_mode: Option<&str>,
+    ) -> Result<(), DbError> {
         sqlx::query(
             "INSERT INTO accounts (goa_id, provider_type, email_address, display_name,
                                    imap_host, imap_port, imap_tls_mode,
@@ -48,29 +54,22 @@ impl Database {
                  smtp_port     = excluded.smtp_port,
                  smtp_tls_mode = excluded.smtp_tls_mode",
         )
-        .bind(&account.goa_id)
+        .bind(goa_id)
         .bind(provider_type)
-        .bind(&account.email_address)
-        .bind(&account.display_name)
-        .bind(&account.imap_config.host)
-        .bind(account.imap_config.port as i32)
-        .bind(imap_tls)
+        .bind(email_address)
+        .bind(display_name)
+        .bind(imap_host)
+        .bind(imap_port as i32)
+        .bind(imap_tls_mode)
         .bind(smtp_host)
-        .bind(smtp_port)
-        .bind(smtp_tls)
+        .bind(smtp_port.map(|p| p as i32))
+        .bind(smtp_tls_mode)
         .execute(self.pool())
         .await?;
 
         Ok(())
     }
-}
 
-fn tls_mode_to_str(mode: TlsMode) -> &'static str {
-    match mode {
-        TlsMode::Implicit => "implicit",
-        TlsMode::StartTls => "starttls",
-        TlsMode::None => "none",
-    }
 }
 
 #[cfg(test)]

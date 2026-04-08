@@ -19,6 +19,7 @@
  */
 
 use std::cell::OnceCell;
+use std::sync::Arc;
 
 use gettextrs::gettext;
 use adw::prelude::*;
@@ -26,9 +27,12 @@ use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 
 use epistle::app_event::AppEvent;
+use epistle::engine::accounts::MailAccountsImpl;
 use epistle::engine::db::Database;
+use epistle::engine::folders::MailFoldersImpl;
 use epistle::event_bus::{EventBus, EventSender};
 use epistle::goa::GoaClient;
+use epistle::sync::service::SyncEngine;
 
 use crate::config::VERSION;
 use crate::EpistleWindow;
@@ -38,9 +42,8 @@ mod imp {
 
     #[derive(Debug, Default)]
     pub struct EpistleApplication {
-        pub(super) database: OnceCell<Database>,
-        pub(super) goa_client: OnceCell<GoaClient>,
         pub(super) event_bus: OnceCell<EventBus>,
+        pub(super) initialized: std::cell::Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -77,15 +80,15 @@ mod imp {
             });
             window.present();
 
-            // Initialize engine on first activation
-            if self.database.get().is_some() {
+            // Wire up engine + sync on first activation only
+            if self.initialized.get() {
                 return;
             }
+            self.initialized.set(true);
 
             let sender = bus.sender();
-            let app = application.clone();
             glib::MainContext::default().spawn_local(async move {
-                if let Err(e) = app.init_engine(sender).await {
+                if let Err(e) = init_engine(sender).await {
                     eprintln!("Engine initialization failed: {e}");
                 }
             });
@@ -94,6 +97,26 @@ mod imp {
 
     impl GtkApplicationImpl for EpistleApplication {}
     impl AdwApplicationImpl for EpistleApplication {}
+}
+
+/// Create engine storage impls, wire up the SyncEngine, and fire AppStarted.
+async fn init_engine(sender: EventSender) -> anyhow::Result<()> {
+    let db_path = glib::user_data_dir().join("epistle").join("mail.db");
+    let db = Database::open(&db_path).await?;
+
+    // Domain-pure engine storage
+    let accounts = Arc::new(MailAccountsImpl::new(db.clone(), sender.clone()));
+    let folders = Arc::new(MailFoldersImpl::new(db, sender.clone()));
+
+    // Sync engine — owns GOA, writes into engine via trait objects
+    let goa = GoaClient::new().await?;
+    let sync = SyncEngine::new(goa, accounts, folders);
+    sync.subscribe();
+
+    // Fire lifecycle event — SyncEngine reacts
+    sender.send(AppEvent::AppStarted);
+
+    Ok(())
 }
 
 glib::wrapper! {
@@ -109,90 +132,6 @@ impl EpistleApplication {
             .property("flags", flags)
             .property("resource-base-path", "/io/github/justinf555/Epistle")
             .build()
-    }
-
-    async fn init_engine(&self, sender: EventSender) -> anyhow::Result<()> {
-        let db_path = glib::user_data_dir().join("epistle").join("mail.db");
-        let db = Database::open(&db_path).await?;
-
-        let mut goa = GoaClient::new().await?;
-        let accounts = goa.discover_accounts().await?;
-
-        for account in &accounts {
-            db.upsert_account(account).await?;
-        }
-
-        eprintln!(
-            "Discovered {} mail account(s){}",
-            accounts.len(),
-            if accounts.is_empty() {
-                ". Add one in GNOME Settings → Online Accounts."
-            } else {
-                ""
-            }
-        );
-
-        for account in &accounts {
-            eprintln!("  • {} ({})", account.email_address, account.provider_name);
-        }
-
-        // Notify sidebar of discovered accounts (shows sections before IMAP)
-        let account_rows = db.list_active_accounts().await?;
-        sender.send(AppEvent::AccountsChanged {
-            accounts: account_rows,
-        });
-
-        // Discover IMAP folders for each account
-        for account in &accounts {
-            match goa.get_imap_auth(&account.goa_id).await {
-                Ok(auth) => {
-                    match epistle::sync::imap::discover_folders(&account.imap_config, &auth).await {
-                        Ok(folders) => {
-                            for folder in &folders {
-                                db.upsert_folder(
-                                    &account.goa_id,
-                                    &folder.name,
-                                    folder.delimiter.as_deref(),
-                                    folder.role.as_deref(),
-                                )
-                                .await?;
-                            }
-                            eprintln!(
-                                "  {} folders for {}",
-                                folders.len(),
-                                account.email_address
-                            );
-
-                            // Notify sidebar of folders for this account
-                            let folder_rows = db.list_folders(&account.goa_id).await?;
-                            sender.send(AppEvent::FoldersChanged {
-                                account_id: account.goa_id.clone(),
-                                email_address: account.email_address.clone(),
-                                folders: folder_rows,
-                            });
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "  IMAP folder discovery failed for {}: {e}",
-                                account.email_address
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "  Failed to get IMAP credentials for {}: {e}",
-                        account.email_address
-                    );
-                }
-            }
-        }
-
-        let imp = self.imp();
-        imp.database.set(db).expect("database already initialized");
-        imp.goa_client.set(goa).expect("goa_client already initialized");
-
-        Ok(())
     }
 
     fn setup_gactions(&self) {
