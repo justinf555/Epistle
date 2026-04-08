@@ -1,0 +1,10 @@
+[package]
+name = "epistle"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# GTK / GNOME
+gtk = { version = "0.11.2", package = "gtk4", features = ["gnome_50"] }
+adw = { version = "0.9.1", package = "libadwaita", features = ["v1_9"] }
+gettext-rs = { version = "0.7", features = ["gettext-system"] }

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="epistle">
+	<schema id="io.github.justinf555.Epistle" path="/io/github/justinf555/Epistle/">
+	</schema>
+</schemalist>

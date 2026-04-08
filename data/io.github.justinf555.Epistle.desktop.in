@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Epistle
+Exec=epistle
+Icon=io.github.justinf555.Epistle
+Terminal=false
+Type=Application
+Categories=Utility;
+Keywords=GTK;
+StartupNotify=true
+DBusActivatable=true
