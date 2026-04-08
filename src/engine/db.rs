@@ -4,6 +4,8 @@ use std::time::Duration;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
+use crate::goa::types::{GoaMailAccount, TlsMode};
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -25,7 +27,7 @@ pub enum DbError {
 ///
 /// Obtain via [`Database::open`], which creates the database file if needed
 /// and runs all outstanding migrations before returning.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Database {
     pool: SqlitePool,
 }
@@ -61,6 +63,55 @@ impl Database {
     /// Access the underlying connection pool.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Insert or update an account from GOA discovery.
+    /// Preserves `created_at` and `last_sync` on conflict.
+    pub async fn upsert_account(&self, account: &GoaMailAccount) -> Result<(), DbError> {
+        let provider_type = account.provider_type.as_goa_str();
+        let imap_tls = tls_mode_to_str(account.imap_config.tls_mode);
+        let smtp_host = account.smtp_config.as_ref().map(|c| c.host.as_str());
+        let smtp_port = account.smtp_config.as_ref().map(|c| c.port as i32);
+        let smtp_tls = account.smtp_config.as_ref().map(|c| tls_mode_to_str(c.tls_mode));
+
+        sqlx::query(
+            "INSERT INTO accounts (goa_id, provider_type, email_address, display_name,
+                                   imap_host, imap_port, imap_tls_mode,
+                                   smtp_host, smtp_port, smtp_tls_mode)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(goa_id) DO UPDATE SET
+                 provider_type = excluded.provider_type,
+                 email_address = excluded.email_address,
+                 display_name  = excluded.display_name,
+                 imap_host     = excluded.imap_host,
+                 imap_port     = excluded.imap_port,
+                 imap_tls_mode = excluded.imap_tls_mode,
+                 smtp_host     = excluded.smtp_host,
+                 smtp_port     = excluded.smtp_port,
+                 smtp_tls_mode = excluded.smtp_tls_mode",
+        )
+        .bind(&account.goa_id)
+        .bind(provider_type)
+        .bind(&account.email_address)
+        .bind(&account.display_name)
+        .bind(&account.imap_config.host)
+        .bind(account.imap_config.port as i32)
+        .bind(imap_tls)
+        .bind(smtp_host)
+        .bind(smtp_port)
+        .bind(smtp_tls)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+}
+
+fn tls_mode_to_str(mode: TlsMode) -> &'static str {
+    match mode {
+        TlsMode::Implicit => "implicit",
+        TlsMode::StartTls => "starttls",
+        TlsMode::None => "none",
     }
 }
 

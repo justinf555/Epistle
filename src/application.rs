@@ -18,10 +18,15 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
+use std::cell::OnceCell;
+
 use gettextrs::gettext;
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
+
+use epistle::engine::db::Database;
+use epistle::goa::GoaClient;
 
 use crate::config::VERSION;
 use crate::EpistleWindow;
@@ -30,7 +35,10 @@ mod imp {
     use super::*;
 
     #[derive(Debug, Default)]
-    pub struct EpistleApplication {}
+    pub struct EpistleApplication {
+        pub(super) database: OnceCell<Database>,
+        pub(super) goa_client: OnceCell<GoaClient>,
+    }
 
     #[glib::object_subclass]
     impl ObjectSubclass for EpistleApplication {
@@ -49,20 +57,25 @@ mod imp {
     }
 
     impl ApplicationImpl for EpistleApplication {
-        // We connect to the activate callback to create a window when the application
-        // has been launched. Additionally, this callback notifies us when the user
-        // tries to launch a "second instance" of the application. When they try
-        // to do that, we'll just present any existing window.
         fn activate(&self) {
             let application = self.obj();
-            // Get the current window or create one if necessary
             let window = application.active_window().unwrap_or_else(|| {
                 let window = EpistleWindow::new(&*application);
                 window.upcast()
             });
-
-            // Ask the window manager/compositor to present the window
             window.present();
+
+            // Initialize engine on first activation
+            if self.database.get().is_some() {
+                return;
+            }
+
+            let app = application.clone();
+            glib::MainContext::default().spawn_local(async move {
+                if let Err(e) = app.init_engine().await {
+                    eprintln!("Engine initialization failed: {e}");
+                }
+            });
         }
     }
 
@@ -83,6 +96,38 @@ impl EpistleApplication {
             .property("flags", flags)
             .property("resource-base-path", "/io/github/justinf555/Epistle")
             .build()
+    }
+
+    async fn init_engine(&self) -> anyhow::Result<()> {
+        let db_path = glib::user_data_dir().join("epistle").join("mail.db");
+        let db = Database::open(&db_path).await?;
+
+        let mut goa = GoaClient::new().await?;
+        let accounts = goa.discover_accounts().await?;
+
+        for account in &accounts {
+            db.upsert_account(account).await?;
+        }
+
+        eprintln!(
+            "Discovered {} mail account(s){}",
+            accounts.len(),
+            if accounts.is_empty() {
+                ". Add one in GNOME Settings → Online Accounts."
+            } else {
+                ""
+            }
+        );
+
+        for account in &accounts {
+            eprintln!("  • {} ({})", account.email_address, account.provider_name);
+        }
+
+        let imp = self.imp();
+        imp.database.set(db).expect("database already initialized");
+        imp.goa_client.set(goa).expect("goa_client already initialized");
+
+        Ok(())
     }
 
     fn setup_gactions(&self) {

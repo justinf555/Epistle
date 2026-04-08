@@ -20,6 +20,7 @@ const GOA_SERVICE: &str = "org.gnome.OnlineAccounts";
 const GOA_MANAGER_PATH: &str = "/org/gnome/OnlineAccounts";
 const MAIL_INTERFACE: &str = "org.gnome.OnlineAccounts.Mail";
 
+#[derive(Debug)]
 pub struct GoaClient {
     connection: Connection,
     /// Cached mapping of GOA account ID → D-Bus object path.
