@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 
-use epistle::event_bus::EventBus;
+use epistle::engine::traits::accounts::MailAccounts;
+use epistle::engine::traits::folders::MailFolders;
 
 use super::sidebar::EpistleSidebar;
 
@@ -72,9 +75,10 @@ impl EpistleWindow {
         self.imp().sidebar.get().expect("sidebar initialized")
     }
 
-    /// Wire the sidebar (and future components) to the event bus.
-    pub fn subscribe_events(&self, bus: &EventBus) {
-        self.sidebar().subscribe_events(bus);
+    /// Pass engine trait objects to child components.
+    /// The sidebar will use root() to subscribe to events and load cached data.
+    pub fn set_engine(&self, accounts: Arc<dyn MailAccounts>, folders: Arc<dyn MailFolders>) {
+        self.sidebar().set_engine(accounts, folders);
     }
 
     fn setup_sidebar(&self) {

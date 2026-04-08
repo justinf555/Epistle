@@ -22,16 +22,17 @@ pub struct SyncEngine {
 }
 
 impl SyncEngine {
-    pub fn new(
-        goa: GoaClient,
+    /// Create a new SyncEngine. Connects to GOA over D-Bus.
+    pub async fn new(
         accounts: Arc<dyn MailAccounts>,
         folders: Arc<dyn MailFolders>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+    ) -> anyhow::Result<Arc<Self>> {
+        let goa = GoaClient::new().await?;
+        Ok(Arc::new(Self {
             goa: tokio::sync::Mutex::new(goa),
             accounts,
             folders,
-        })
+        }))
     }
 
     /// Subscribe to the event bus. Reacts to lifecycle events.

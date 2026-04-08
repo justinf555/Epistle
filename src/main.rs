@@ -50,13 +50,10 @@ fn main() -> glib::ExitCode {
     let engine = runtime.block_on(epistle::engine::MailEngine::open())
         .expect("Failed to initialize mail engine");
 
-    let goa = runtime.block_on(epistle::goa::GoaClient::new())
-        .expect("Failed to connect to GOA");
-    let sync = epistle::sync::service::SyncEngine::new(
-        goa,
+    let sync = runtime.block_on(epistle::sync::service::SyncEngine::new(
         engine.accounts(),
         engine.folders(),
-    );
+    )).expect("Failed to initialize sync engine");
     sync.subscribe();
 
     // Pass engine to GTK app

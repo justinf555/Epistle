@@ -73,8 +73,7 @@ mod imp {
 
             let window = application.active_window().unwrap_or_else(|| {
                 let window = EpistleWindow::new(&*application);
-                window.subscribe_events(engine.bus());
-                window.sidebar().load_cached(engine.accounts(), engine.folders());
+                window.set_engine(engine.accounts(), engine.folders());
                 window.upcast()
             });
             window.present();
