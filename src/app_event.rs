@@ -10,6 +10,9 @@ pub enum AppEvent {
     /// Application has started — SyncEngine should begin discovery.
     AppStarted,
 
+    /// Application is shutting down — components should clean up.
+    AppShutdown,
+
     /// Account discovery completed — sidebar should show account sections.
     AccountsChanged { accounts: Vec<Account> },
 

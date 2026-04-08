@@ -74,6 +74,13 @@ mod imp {
                 engine.sender().send(AppEvent::AppStarted);
             }
         }
+
+        fn shutdown(&self) {
+            if let Some(engine) = self.engine.get() {
+                engine.sender().send(AppEvent::AppShutdown);
+            }
+            self.parent_shutdown();
+        }
     }
 
     impl GtkApplicationImpl for EpistleApplication {}

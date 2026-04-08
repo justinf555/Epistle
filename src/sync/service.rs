@@ -42,16 +42,19 @@ impl SyncEngine {
         self.running.store(true, std::sync::atomic::Ordering::Relaxed);
         let engine = Arc::clone(self);
         crate::event_bus::subscribe(move |event| {
-            if !engine.running.load(std::sync::atomic::Ordering::Relaxed) {
-                return;
-            }
-            if matches!(event, AppEvent::AppStarted) {
-                let engine = Arc::clone(&engine);
-                tokio::spawn(async move {
-                    if let Err(e) = engine.run_initial_sync().await {
-                        eprintln!("Initial sync failed: {e}");
-                    }
-                });
+            match event {
+                AppEvent::AppStarted if engine.running.load(std::sync::atomic::Ordering::Relaxed) => {
+                    let engine = Arc::clone(&engine);
+                    tokio::spawn(async move {
+                        if let Err(e) = engine.run_initial_sync().await {
+                            eprintln!("Initial sync failed: {e}");
+                        }
+                    });
+                }
+                AppEvent::AppShutdown => {
+                    engine.stop();
+                }
+                _ => {}
             }
         });
     }
