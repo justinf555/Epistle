@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <gresources>
   <gresource prefix="/io/github/justinf555/Epistle">
-    <file preprocess="xml-stripblanks">window.ui</file>
-    <file preprocess="xml-stripblanks">shortcuts-dialog.ui</file>
+    <file alias="window.ui" preprocess="xml-stripblanks">ui/window.ui</file>
+    <file alias="shortcuts-dialog.ui" preprocess="xml-stripblanks">ui/shortcuts-dialog.ui</file>
   </gresource>
 </gresources>

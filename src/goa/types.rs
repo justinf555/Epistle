@@ -1,0 +1,1 @@
+// ImapConfig, SmtpConfig, AuthMethod, ProviderType
