@@ -42,14 +42,12 @@ fn main() -> glib::ExitCode {
         .expect("Could not load resources");
     gio::resources_register(&resources);
 
-    // Create a new GtkApplication. The application manages our main loop,
-    // application windows, integration with the window manager/compositor, and
-    // desktop features such as file opening and single-instance applications.
-    let app = EpistleApplication::new("io.github.justinf555.Epistle", &gio::ApplicationFlags::empty());
+    // Build a Tokio runtime before the GTK main loop. The _guard ensures that
+    // sqlx, tokio::fs, and other Tokio APIs work from within the GLib main
+    // context without explicitly passing a runtime handle around.
+    let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    let _guard = runtime.enter();
 
-    // Run the application. This function will block until the application
-    // exits. Upon return, we have our exit code to return to the shell. (This
-    // is the code you see when you do `echo $?` after running a command in a
-    // terminal.
+    let app = EpistleApplication::new("io.github.justinf555.Epistle", &gio::ApplicationFlags::empty());
     app.run()
 }

@@ -51,6 +51,14 @@ impl ProviderType {
     pub fn is_oauth(&self) -> bool {
         matches!(self, Self::Google | Self::Microsoft)
     }
+
+    pub fn as_goa_str(&self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::Microsoft => "ms_graph",
+            Self::GenericImap => "imap_smtp",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

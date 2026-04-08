@@ -6,6 +6,8 @@ use sqlx::SqlitePool;
 
 use thiserror::Error;
 
+mod accounts;
+
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("database error: {0}")]
@@ -25,7 +27,7 @@ pub enum DbError {
 ///
 /// Obtain via [`Database::open`], which creates the database file if needed
 /// and runs all outstanding migrations before returning.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Database {
     pool: SqlitePool,
 }
@@ -85,37 +87,5 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(row.0, 1);
-    }
-
-    #[tokio::test]
-    async fn insert_and_read_account() {
-        let dir = tempdir().unwrap();
-        let db = Database::open(&dir.path().join("mail.db")).await.unwrap();
-
-        sqlx::query(
-            "INSERT INTO accounts (goa_id, provider_type, email_address, imap_host, imap_port, imap_tls_mode)
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind("account_1234")
-        .bind("google")
-        .bind("user@gmail.com")
-        .bind("imap.gmail.com")
-        .bind(993)
-        .bind("implicit")
-        .execute(db.pool())
-        .await
-        .unwrap();
-
-        let row: (String, String, i32) = sqlx::query_as(
-            "SELECT email_address, imap_host, imap_port FROM accounts WHERE goa_id = ?",
-        )
-        .bind("account_1234")
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
-
-        assert_eq!(row.0, "user@gmail.com");
-        assert_eq!(row.1, "imap.gmail.com");
-        assert_eq!(row.2, 993);
     }
 }
