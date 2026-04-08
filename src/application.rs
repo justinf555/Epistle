@@ -99,8 +99,11 @@ mod imp {
     impl AdwApplicationImpl for EpistleApplication {}
 }
 
-/// Create engine storage impls, wire up the SyncEngine, and fire AppStarted.
+/// Create engine storage impls, emit cached data, wire up SyncEngine, and fire AppStarted.
 async fn init_engine(sender: EventSender) -> anyhow::Result<()> {
+    use epistle::engine::traits::accounts::MailAccounts;
+    use epistle::engine::traits::folders::MailFolders;
+
     let db_path = glib::user_data_dir().join("epistle").join("mail.db");
     let db = Database::open(&db_path).await?;
 
@@ -108,12 +111,31 @@ async fn init_engine(sender: EventSender) -> anyhow::Result<()> {
     let accounts = Arc::new(MailAccountsImpl::new(db.clone(), sender.clone()));
     let folders = Arc::new(MailFoldersImpl::new(db, sender.clone()));
 
+    // Show cached data immediately — sidebar populates before IMAP finishes
+    let cached_accounts = accounts.list_accounts().await?;
+    if !cached_accounts.is_empty() {
+        // Accounts first so sidebar creates sections, then folders fill them
+        sender.send(AppEvent::AccountsChanged {
+            accounts: cached_accounts.clone(),
+        });
+        for account in &cached_accounts {
+            let cached_folders = folders.list_folders(&account.goa_id).await?;
+            if !cached_folders.is_empty() {
+                sender.send(AppEvent::FoldersChanged {
+                    account_id: account.goa_id.clone(),
+                    email_address: account.email_address.clone(),
+                    folders: cached_folders,
+                });
+            }
+        }
+    }
+
     // Sync engine — owns GOA, writes into engine via trait objects
     let goa = GoaClient::new().await?;
     let sync = SyncEngine::new(goa, accounts, folders);
     sync.subscribe();
 
-    // Fire lifecycle event — SyncEngine reacts
+    // Fire lifecycle event — SyncEngine reacts (IMAP runs in background)
     sender.send(AppEvent::AppStarted);
 
     Ok(())
