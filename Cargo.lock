@@ -544,6 +544,7 @@ dependencies = [
  "gettext-rs",
  "gtk4",
  "libadwaita",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",

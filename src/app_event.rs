@@ -1,5 +1,5 @@
-use crate::engine::db::accounts::AccountRow;
-use crate::engine::db::folders::FolderRow;
+use crate::engine::traits::accounts::Account;
+use crate::engine::traits::folders::Folder;
 
 /// Application-layer event type.
 ///
@@ -7,13 +7,16 @@ use crate::engine::db::folders::FolderRow;
 /// GTK main thread. Backend tasks emit events; UI components subscribe and react.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
-    /// GOA account discovery completed — sidebar should show account sections.
-    AccountsChanged { accounts: Vec<AccountRow> },
+    /// Application has started — SyncEngine should begin discovery.
+    AppStarted,
+
+    /// Account discovery completed — sidebar should show account sections.
+    AccountsChanged { accounts: Vec<Account> },
 
     /// IMAP folder discovery completed for one account.
     FoldersChanged {
         account_id: String,
         email_address: String,
-        folders: Vec<FolderRow>,
+        folders: Vec<Folder>,
     },
 }

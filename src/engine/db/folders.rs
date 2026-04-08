@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+
 use super::{Database, DbError};
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -9,29 +11,50 @@ pub struct FolderRow {
     pub role: Option<String>,
 }
 
+/// Fields for upserting a folder. Passed as a slice to bulk operations.
+pub struct FolderFields<'a> {
+    pub name: &'a str,
+    pub delimiter: Option<&'a str>,
+    pub role: Option<&'a str>,
+}
+
 impl Database {
-    /// Insert or update a folder from IMAP LIST results.
-    pub async fn upsert_folder(
+    /// Bulk upsert folders for an account within a transaction. Skips rows where
+    /// content hasn't changed (via content_hash). Returns `true` if any rows were modified.
+    pub async fn bulk_upsert_folders(
         &self,
         account_id: &str,
-        name: &str,
-        delimiter: Option<&str>,
-        role: Option<&str>,
-    ) -> Result<(), DbError> {
-        sqlx::query(
-            "INSERT INTO folders (account_id, name, delimiter, role)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT(account_id, name) DO UPDATE SET
-                 delimiter = excluded.delimiter,
-                 role = excluded.role",
-        )
-        .bind(account_id)
-        .bind(name)
-        .bind(delimiter)
-        .bind(role)
-        .execute(self.pool())
-        .await?;
-        Ok(())
+        folders: &[FolderFields<'_>],
+    ) -> Result<bool, DbError> {
+        let mut tx = self.pool().begin().await?;
+        let mut changed = false;
+
+        for folder in folders {
+            let hash = folder_content_hash(folder);
+            let result = sqlx::query(
+                "INSERT INTO folders (account_id, name, delimiter, role, content_hash)
+                 VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(account_id, name) DO UPDATE SET
+                     delimiter    = excluded.delimiter,
+                     role         = excluded.role,
+                     content_hash = excluded.content_hash
+                 WHERE content_hash IS NOT excluded.content_hash",
+            )
+            .bind(account_id)
+            .bind(folder.name)
+            .bind(folder.delimiter)
+            .bind(folder.role)
+            .bind(&hash)
+            .execute(&mut *tx)
+            .await?;
+
+            if result.rows_affected() > 0 {
+                changed = true;
+            }
+        }
+
+        tx.commit().await?;
+        Ok(changed)
     }
 
     /// Return all folders for a given account, ordered by role (standard first) then name.
@@ -58,6 +81,16 @@ impl Database {
     }
 }
 
+fn folder_content_hash(f: &FolderFields<'_>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(f.name.as_bytes());
+    hasher.update(b"|");
+    hasher.update(f.delimiter.unwrap_or("").as_bytes());
+    hasher.update(b"|");
+    hasher.update(f.role.unwrap_or("").as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,16 +110,25 @@ mod tests {
         .await
         .unwrap();
 
-        db.upsert_folder("acct1", "INBOX", Some("/"), Some("inbox")).await.unwrap();
-        db.upsert_folder("acct1", "[Gmail]/Sent Mail", Some("/"), Some("sent")).await.unwrap();
-        db.upsert_folder("acct1", "Custom Label", Some("/"), None).await.unwrap();
+        let folders = [
+            FolderFields { name: "INBOX", delimiter: Some("/"), role: Some("inbox") },
+            FolderFields { name: "[Gmail]/Sent Mail", delimiter: Some("/"), role: Some("sent") },
+            FolderFields { name: "Custom Label", delimiter: Some("/"), role: None },
+        ];
 
-        let folders = db.list_folders("acct1").await.unwrap();
-        assert_eq!(folders.len(), 3);
-        assert_eq!(folders[0].name, "INBOX");
-        assert_eq!(folders[0].role.as_deref(), Some("inbox"));
-        assert_eq!(folders[1].name, "[Gmail]/Sent Mail");
-        assert_eq!(folders[2].name, "Custom Label");
-        assert!(folders[2].role.is_none());
+        let changed = db.bulk_upsert_folders("acct1", &folders).await.unwrap();
+        assert!(changed);
+
+        let rows = db.list_folders("acct1").await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].name, "INBOX");
+        assert_eq!(rows[0].role.as_deref(), Some("inbox"));
+        assert_eq!(rows[1].name, "[Gmail]/Sent Mail");
+        assert_eq!(rows[2].name, "Custom Label");
+        assert!(rows[2].role.is_none());
+
+        // Second upsert with same data — no changes
+        let changed = db.bulk_upsert_folders("acct1", &folders).await.unwrap();
+        assert!(!changed);
     }
 }

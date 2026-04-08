@@ -1,5 +1,2 @@
-pub mod db;
-pub mod traits;
-
 pub mod accounts;
 pub mod folders;

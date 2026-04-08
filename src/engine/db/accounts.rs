@@ -1,4 +1,4 @@
-use crate::goa::types::{GoaMailAccount, TlsMode};
+use sha2::{Digest, Sha256};
 
 use super::{Database, DbError};
 
@@ -9,6 +9,20 @@ pub struct AccountRow {
     pub provider_type: String,
     pub email_address: String,
     pub display_name: Option<String>,
+}
+
+/// Fields for upserting an account. Passed as a slice to bulk operations.
+pub struct AccountFields<'a> {
+    pub goa_id: &'a str,
+    pub provider_type: &'a str,
+    pub email_address: &'a str,
+    pub display_name: Option<&'a str>,
+    pub imap_host: &'a str,
+    pub imap_port: u16,
+    pub imap_tls_mode: &'a str,
+    pub smtp_host: Option<&'a str>,
+    pub smtp_port: Option<u16>,
+    pub smtp_tls_mode: Option<&'a str>,
 }
 
 impl Database {
@@ -23,54 +37,76 @@ impl Database {
         Ok(rows)
     }
 
-    /// Insert or update an account from GOA discovery.
-    /// Preserves `created_at` and `last_sync` on conflict.
-    pub async fn upsert_account(&self, account: &GoaMailAccount) -> Result<(), DbError> {
-        let provider_type = account.provider_type.as_goa_str();
-        let imap_tls = tls_mode_to_str(account.imap_config.tls_mode);
-        let smtp_host = account.smtp_config.as_ref().map(|c| c.host.as_str());
-        let smtp_port = account.smtp_config.as_ref().map(|c| c.port as i32);
-        let smtp_tls = account.smtp_config.as_ref().map(|c| tls_mode_to_str(c.tls_mode));
+    /// Bulk upsert accounts within a transaction. Skips rows where content
+    /// hasn't changed (via content_hash). Returns `true` if any rows were modified.
+    pub async fn bulk_upsert_accounts(&self, accounts: &[AccountFields<'_>]) -> Result<bool, DbError> {
+        let mut tx = self.pool().begin().await?;
+        let mut changed = false;
 
-        sqlx::query(
-            "INSERT INTO accounts (goa_id, provider_type, email_address, display_name,
-                                   imap_host, imap_port, imap_tls_mode,
-                                   smtp_host, smtp_port, smtp_tls_mode)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(goa_id) DO UPDATE SET
-                 provider_type = excluded.provider_type,
-                 email_address = excluded.email_address,
-                 display_name  = excluded.display_name,
-                 imap_host     = excluded.imap_host,
-                 imap_port     = excluded.imap_port,
-                 imap_tls_mode = excluded.imap_tls_mode,
-                 smtp_host     = excluded.smtp_host,
-                 smtp_port     = excluded.smtp_port,
-                 smtp_tls_mode = excluded.smtp_tls_mode",
-        )
-        .bind(&account.goa_id)
-        .bind(provider_type)
-        .bind(&account.email_address)
-        .bind(&account.display_name)
-        .bind(&account.imap_config.host)
-        .bind(account.imap_config.port as i32)
-        .bind(imap_tls)
-        .bind(smtp_host)
-        .bind(smtp_port)
-        .bind(smtp_tls)
-        .execute(self.pool())
-        .await?;
+        for account in accounts {
+            let hash = account_content_hash(account);
+            let result = sqlx::query(
+                "INSERT INTO accounts (goa_id, provider_type, email_address, display_name,
+                                       imap_host, imap_port, imap_tls_mode,
+                                       smtp_host, smtp_port, smtp_tls_mode, content_hash)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(goa_id) DO UPDATE SET
+                     provider_type = excluded.provider_type,
+                     email_address = excluded.email_address,
+                     display_name  = excluded.display_name,
+                     imap_host     = excluded.imap_host,
+                     imap_port     = excluded.imap_port,
+                     imap_tls_mode = excluded.imap_tls_mode,
+                     smtp_host     = excluded.smtp_host,
+                     smtp_port     = excluded.smtp_port,
+                     smtp_tls_mode = excluded.smtp_tls_mode,
+                     content_hash  = excluded.content_hash
+                 WHERE content_hash IS NOT excluded.content_hash",
+            )
+            .bind(account.goa_id)
+            .bind(account.provider_type)
+            .bind(account.email_address)
+            .bind(account.display_name)
+            .bind(account.imap_host)
+            .bind(account.imap_port as i32)
+            .bind(account.imap_tls_mode)
+            .bind(account.smtp_host)
+            .bind(account.smtp_port.map(|p| p as i32))
+            .bind(account.smtp_tls_mode)
+            .bind(&hash)
+            .execute(&mut *tx)
+            .await?;
 
-        Ok(())
+            if result.rows_affected() > 0 {
+                changed = true;
+            }
+        }
+
+        tx.commit().await?;
+        Ok(changed)
     }
 }
 
-fn tls_mode_to_str(mode: TlsMode) -> &'static str {
-    match mode {
-        TlsMode::Implicit => "implicit",
-        TlsMode::StartTls => "starttls",
-        TlsMode::None => "none",
-    }
+fn account_content_hash(a: &AccountFields<'_>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(a.provider_type.as_bytes());
+    hasher.update(b"|");
+    hasher.update(a.email_address.as_bytes());
+    hasher.update(b"|");
+    hasher.update(a.display_name.unwrap_or("").as_bytes());
+    hasher.update(b"|");
+    hasher.update(a.imap_host.as_bytes());
+    hasher.update(b"|");
+    hasher.update(a.imap_port.to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(a.imap_tls_mode.as_bytes());
+    hasher.update(b"|");
+    hasher.update(a.smtp_host.unwrap_or("").as_bytes());
+    hasher.update(b"|");
+    hasher.update(a.smtp_port.map(|p| p.to_string()).unwrap_or_default().as_bytes());
+    hasher.update(b"|");
+    hasher.update(a.smtp_tls_mode.unwrap_or("").as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -83,30 +119,28 @@ mod tests {
         let dir = tempdir().unwrap();
         let db = Database::open(&dir.path().join("mail.db")).await.unwrap();
 
-        sqlx::query(
-            "INSERT INTO accounts (goa_id, provider_type, email_address, imap_host, imap_port, imap_tls_mode)
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind("account_1234")
-        .bind("google")
-        .bind("user@gmail.com")
-        .bind("imap.gmail.com")
-        .bind(993)
-        .bind("implicit")
-        .execute(db.pool())
-        .await
-        .unwrap();
+        let accounts = [AccountFields {
+            goa_id: "account_1234",
+            provider_type: "google",
+            email_address: "user@gmail.com",
+            display_name: None,
+            imap_host: "imap.gmail.com",
+            imap_port: 993,
+            imap_tls_mode: "implicit",
+            smtp_host: None,
+            smtp_port: None,
+            smtp_tls_mode: None,
+        }];
 
-        let row: (String, String, i32) = sqlx::query_as(
-            "SELECT email_address, imap_host, imap_port FROM accounts WHERE goa_id = ?",
-        )
-        .bind("account_1234")
-        .fetch_one(db.pool())
-        .await
-        .unwrap();
+        let changed = db.bulk_upsert_accounts(&accounts).await.unwrap();
+        assert!(changed);
 
-        assert_eq!(row.0, "user@gmail.com");
-        assert_eq!(row.1, "imap.gmail.com");
-        assert_eq!(row.2, 993);
+        let rows = db.list_active_accounts().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].email_address, "user@gmail.com");
+
+        // Second upsert with same data — no changes
+        let changed = db.bulk_upsert_accounts(&accounts).await.unwrap();
+        assert!(!changed);
     }
 }
