@@ -2,7 +2,27 @@ use crate::goa::types::{GoaMailAccount, TlsMode};
 
 use super::{Database, DbError};
 
+/// A row from the accounts table.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AccountRow {
+    pub goa_id: String,
+    pub provider_type: String,
+    pub email_address: String,
+    pub display_name: Option<String>,
+}
+
 impl Database {
+    /// Return all active accounts, ordered by email address.
+    pub async fn list_active_accounts(&self) -> Result<Vec<AccountRow>, DbError> {
+        let rows = sqlx::query_as::<_, AccountRow>(
+            "SELECT goa_id, provider_type, email_address, display_name
+             FROM accounts WHERE active = 1 ORDER BY email_address",
+        )
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
     /// Insert or update an account from GOA discovery.
     /// Preserves `created_at` and `last_sync` on conflict.
     pub async fn upsert_account(&self, account: &GoaMailAccount) -> Result<(), DbError> {

@@ -123,6 +123,14 @@ impl EpistleApplication {
             eprintln!("  • {} ({})", account.email_address, account.provider_name);
         }
 
+        // Populate sidebar with per-account sections
+        let account_rows = db.list_active_accounts().await?;
+        if let Some(window) = self.active_window() {
+            if let Some(window) = window.downcast_ref::<EpistleWindow>() {
+                window.sidebar().populate_accounts(&account_rows);
+            }
+        }
+
         let imp = self.imp();
         imp.database.set(db).expect("database already initialized");
         imp.goa_client.set(goa).expect("goa_client already initialized");

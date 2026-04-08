@@ -11,27 +11,6 @@ template $EpistleWindow : Adw.ApplicationWindow {
       min-sidebar-width: 210;
       max-sidebar-width: 280;
 
-      sidebar: Adw.ToolbarView sidebar_toolbar {
-        [top]
-        Adw.HeaderBar {
-          show-title: false;
-
-          [start]
-          Gtk.Button {
-            icon-name: "mail-message-new-symbolic";
-            tooltip-text: _("Compose");
-          }
-
-          [end]
-          Gtk.MenuButton {
-            primary: true;
-            icon-name: "open-menu-symbolic";
-            tooltip-text: _("Main Menu");
-            menu-model: primary_menu;
-          }
-        }
-      };
-
       content: Adw.NavigationSplitView inner_split {
         min-sidebar-width: 280;
         max-sidebar-width: 400;
