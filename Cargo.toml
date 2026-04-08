@@ -16,6 +16,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "fs"] }
 # D-Bus
 zbus = "5"
 
+# IMAP
+async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
+tokio-native-tls = "0.3"
+futures = "0.3"
+
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 
