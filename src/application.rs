@@ -19,7 +19,6 @@
  */
 
 use std::cell::OnceCell;
-use std::sync::Arc;
 
 use gettextrs::gettext;
 use adw::prelude::*;
@@ -27,12 +26,7 @@ use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 
 use epistle::app_event::AppEvent;
-use epistle::engine::accounts::MailAccountsImpl;
-use epistle::engine::db::Database;
-use epistle::engine::folders::MailFoldersImpl;
-use epistle::event_bus::{EventBus, EventSender};
-use epistle::goa::GoaClient;
-use epistle::sync::service::SyncEngine;
+use epistle::engine::MailEngine;
 
 use crate::config::VERSION;
 use crate::EpistleWindow;
@@ -40,10 +34,20 @@ use crate::EpistleWindow;
 mod imp {
     use super::*;
 
-    #[derive(Debug, Default)]
+    #[derive(Default)]
     pub struct EpistleApplication {
-        pub(super) event_bus: OnceCell<EventBus>,
-        pub(super) initialized: std::cell::Cell<bool>,
+        pub(super) engine: OnceCell<MailEngine>,
+        pub(super) activated: std::cell::Cell<bool>,
+    }
+
+    // MailEngine is not Debug, so implement manually
+    impl std::fmt::Debug for EpistleApplication {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("EpistleApplication")
+                .field("engine", &self.engine.get().map(|_| "MailEngine"))
+                .field("activated", &self.activated)
+                .finish()
+        }
     }
 
     #[glib::object_subclass]
@@ -65,80 +69,26 @@ mod imp {
     impl ApplicationImpl for EpistleApplication {
         fn activate(&self) {
             let application = self.obj();
-
-            // Create the event bus once, before the window
-            if self.event_bus.get().is_none() {
-                let bus = EventBus::new();
-                self.event_bus.set(bus).expect("event_bus set once");
-            }
-            let bus = self.event_bus.get().unwrap();
+            let engine = self.engine.get().expect("engine set before activate");
 
             let window = application.active_window().unwrap_or_else(|| {
                 let window = EpistleWindow::new(&*application);
-                window.subscribe_events(bus);
+                window.subscribe_events(engine.bus());
+                window.sidebar().load_cached(engine.accounts(), engine.folders());
                 window.upcast()
             });
             window.present();
 
-            // Wire up engine + sync on first activation only
-            if self.initialized.get() {
-                return;
+            // Emit AppStarted once — SyncEngine reacts
+            if !self.activated.get() {
+                self.activated.set(true);
+                engine.sender().send(AppEvent::AppStarted);
             }
-            self.initialized.set(true);
-
-            let sender = bus.sender();
-            glib::MainContext::default().spawn_local(async move {
-                if let Err(e) = init_engine(sender).await {
-                    eprintln!("Engine initialization failed: {e}");
-                }
-            });
         }
     }
 
     impl GtkApplicationImpl for EpistleApplication {}
     impl AdwApplicationImpl for EpistleApplication {}
-}
-
-/// Create engine storage impls, emit cached data, wire up SyncEngine, and fire AppStarted.
-async fn init_engine(sender: EventSender) -> anyhow::Result<()> {
-    use epistle::engine::traits::accounts::MailAccounts;
-    use epistle::engine::traits::folders::MailFolders;
-
-    let db_path = glib::user_data_dir().join("epistle").join("mail.db");
-    let db = Database::open(&db_path).await?;
-
-    // Domain-pure engine storage
-    let accounts = Arc::new(MailAccountsImpl::new(db.clone(), sender.clone()));
-    let folders = Arc::new(MailFoldersImpl::new(db, sender.clone()));
-
-    // Show cached data immediately — sidebar populates before IMAP finishes
-    let cached_accounts = accounts.list_accounts().await?;
-    if !cached_accounts.is_empty() {
-        // Accounts first so sidebar creates sections, then folders fill them
-        sender.send(AppEvent::AccountsChanged {
-            accounts: cached_accounts.clone(),
-        });
-        for account in &cached_accounts {
-            let cached_folders = folders.list_folders(&account.goa_id).await?;
-            if !cached_folders.is_empty() {
-                sender.send(AppEvent::FoldersChanged {
-                    account_id: account.goa_id.clone(),
-                    email_address: account.email_address.clone(),
-                    folders: cached_folders,
-                });
-            }
-        }
-    }
-
-    // Sync engine — owns GOA, writes into engine via trait objects
-    let goa = GoaClient::new().await?;
-    let sync = SyncEngine::new(goa, accounts, folders);
-    sync.subscribe();
-
-    // Fire lifecycle event — SyncEngine reacts (IMAP runs in background)
-    sender.send(AppEvent::AppStarted);
-
-    Ok(())
 }
 
 glib::wrapper! {
@@ -154,6 +104,11 @@ impl EpistleApplication {
             .property("flags", flags)
             .property("resource-base-path", "/io/github/justinf555/Epistle")
             .build()
+    }
+
+    /// Inject the mail engine, built by main.rs before GTK starts.
+    pub fn set_engine(&self, engine: MailEngine) {
+        self.imp().engine.set(engine).ok().expect("engine set once");
     }
 
     fn setup_gactions(&self) {

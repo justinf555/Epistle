@@ -1,11 +1,13 @@
+use std::sync::Arc;
+
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::glib;
 
 use epistle::app_event::AppEvent;
+use epistle::engine::traits::accounts::{Account, MailAccounts};
+use epistle::engine::traits::folders::{Folder, MailFolders};
 use epistle::event_bus::EventBus;
-use epistle::engine::traits::accounts::Account;
-use epistle::engine::traits::folders::Folder;
 
 mod imp {
     use super::*;
@@ -124,6 +126,30 @@ impl EpistleSidebar {
                     sidebar.on_folders_changed(email_address, folders);
                 }
                 _ => {}
+            }
+        });
+    }
+
+    /// Load cached accounts and folders from the engine and populate immediately.
+    pub fn load_cached(&self, accounts: Arc<dyn MailAccounts>, folders: Arc<dyn MailFolders>) {
+        let sidebar_weak = self.downgrade();
+        glib::MainContext::default().spawn_local(async move {
+            let Some(sidebar) = sidebar_weak.upgrade() else {
+                return;
+            };
+            let Ok(cached_accounts) = accounts.list_accounts().await else {
+                return;
+            };
+            if cached_accounts.is_empty() {
+                return;
+            }
+            sidebar.on_accounts_changed(&cached_accounts);
+            for account in &cached_accounts {
+                if let Ok(cached_folders) = folders.list_folders(&account.goa_id).await {
+                    if !cached_folders.is_empty() {
+                        sidebar.on_folders_changed(&account.email_address, &cached_folders);
+                    }
+                }
             }
         });
     }

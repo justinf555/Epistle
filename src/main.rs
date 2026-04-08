@@ -42,12 +42,28 @@ fn main() -> glib::ExitCode {
         .expect("Could not load resources");
     gio::resources_register(&resources);
 
-    // Build a Tokio runtime before the GTK main loop. The _guard ensures that
-    // sqlx, tokio::fs, and other Tokio APIs work from within the GLib main
-    // context without explicitly passing a runtime handle around.
+    // Build a Tokio runtime before the GTK main loop.
     let runtime = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
     let _guard = runtime.enter();
 
-    let app = EpistleApplication::new("io.github.justinf555.Epistle", &gio::ApplicationFlags::empty());
+    // Build backend before GTK starts — main.rs is the composition root
+    let engine = runtime.block_on(epistle::engine::MailEngine::open())
+        .expect("Failed to initialize mail engine");
+
+    let goa = runtime.block_on(epistle::goa::GoaClient::new())
+        .expect("Failed to connect to GOA");
+    let sync = epistle::sync::service::SyncEngine::new(
+        goa,
+        engine.accounts(),
+        engine.folders(),
+    );
+    sync.subscribe();
+
+    // Pass engine to GTK app
+    let app = EpistleApplication::new(
+        "io.github.justinf555.Epistle",
+        &gio::ApplicationFlags::empty(),
+    );
+    app.set_engine(engine);
     app.run()
 }
