@@ -7,6 +7,7 @@ use sqlx::SqlitePool;
 use thiserror::Error;
 
 pub mod accounts;
+pub mod folders;
 
 #[derive(Debug, Error)]
 pub enum DbError {

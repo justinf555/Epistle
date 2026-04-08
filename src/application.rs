@@ -123,11 +123,54 @@ impl EpistleApplication {
             eprintln!("  • {} ({})", account.email_address, account.provider_name);
         }
 
-        // Populate sidebar with per-account sections
+        // Discover IMAP folders for each account
+        for account in &accounts {
+            match goa.get_imap_auth(&account.goa_id).await {
+                Ok(auth) => {
+                    match epistle::sync::imap::discover_folders(&account.imap_config, &auth).await {
+                        Ok(folders) => {
+                            for folder in &folders {
+                                db.upsert_folder(
+                                    &account.goa_id,
+                                    &folder.name,
+                                    folder.delimiter.as_deref(),
+                                    folder.role.as_deref(),
+                                )
+                                .await?;
+                            }
+                            eprintln!(
+                                "  {} folders for {}",
+                                folders.len(),
+                                account.email_address
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  IMAP folder discovery failed for {}: {e}",
+                                account.email_address
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  Failed to get IMAP credentials for {}: {e}",
+                        account.email_address
+                    );
+                }
+            }
+        }
+
+        // Populate sidebar with per-account sections and real folders
         let account_rows = db.list_active_accounts().await?;
+        let mut folder_map = std::collections::HashMap::new();
+        for account_row in &account_rows {
+            let folders = db.list_folders(&account_row.goa_id).await?;
+            folder_map.insert(account_row.goa_id.clone(), folders);
+        }
         if let Some(window) = self.active_window() {
             if let Some(window) = window.downcast_ref::<EpistleWindow>() {
-                window.sidebar().populate_accounts(&account_rows);
+                window.sidebar().populate_accounts(&account_rows, &folder_map);
             }
         }
 
