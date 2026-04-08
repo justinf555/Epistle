@@ -19,6 +19,7 @@ pub struct SyncEngine {
     goa: tokio::sync::Mutex<GoaClient>,
     accounts: Arc<dyn MailAccounts>,
     folders: Arc<dyn MailFolders>,
+    running: std::sync::atomic::AtomicBool,
 }
 
 impl SyncEngine {
@@ -32,13 +33,18 @@ impl SyncEngine {
             goa: tokio::sync::Mutex::new(goa),
             accounts,
             folders,
+            running: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
     /// Start the sync service. Subscribes to lifecycle events and reacts.
     pub fn start(self: &Arc<Self>) {
+        self.running.store(true, std::sync::atomic::Ordering::Relaxed);
         let engine = Arc::clone(self);
         crate::event_bus::subscribe(move |event| {
+            if !engine.running.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
             if matches!(event, AppEvent::AppStarted) {
                 let engine = Arc::clone(&engine);
                 tokio::spawn(async move {
@@ -48,6 +54,11 @@ impl SyncEngine {
                 });
             }
         });
+    }
+
+    /// Stop the sync service. Events will be ignored until start() is called again.
+    pub fn stop(&self) {
+        self.running.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Run account discovery + folder sync for all accounts.
