@@ -59,17 +59,10 @@ fn main() -> glib::ExitCode {
     let engine = runtime.block_on(epistle::engine::MailEngine::open())
         .expect("Failed to initialize mail engine");
 
-    // Read sync settings from GSettings
     let settings = gio::Settings::new("io.github.justinf555.Epistle");
-    let prefetch_days = settings.int("sync-body-prefetch-days").max(0) as u32;
-
     let sync = runtime.block_on(epistle::sync::service::SyncEngine::new(
-        engine.accounts(),
-        engine.folders(),
-        engine.messages(),
-        engine.body_store(),
-        engine.sender(),
-        prefetch_days,
+        &engine,
+        &settings,
     )).expect("Failed to initialize sync engine");
     sync.start();
 

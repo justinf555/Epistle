@@ -3,14 +3,16 @@ use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
 
+use gtk::gio;
+use gtk::prelude::*;
 use tokio::sync::mpsc;
 
 use crate::app_event::AppEvent;
-use crate::engine::body_store::BodyStore;
 use crate::engine::pipeline::EmailPipeline;
 use crate::engine::traits::accounts::{Account, MailAccounts};
 use crate::engine::traits::folders::{Folder, MailFolders};
 use crate::engine::traits::messages::{MailMessages, Message};
+use crate::engine::MailEngine;
 use crate::event_bus::EventSender;
 use crate::goa::types::{GoaMailAccount, ImapConfig, TlsMode};
 use crate::goa::GoaClient;
@@ -54,13 +56,16 @@ pub struct SyncEngine {
 impl SyncEngine {
     /// Create a new SyncEngine. Connects to GOA over D-Bus.
     pub async fn new(
-        accounts: Arc<dyn MailAccounts>,
-        folders: Arc<dyn MailFolders>,
-        messages: Arc<dyn MailMessages>,
-        body_store: Arc<BodyStore>,
-        sender: EventSender,
-        prefetch_days: u32,
+        engine: &MailEngine,
+        settings: &gio::Settings,
     ) -> anyhow::Result<Arc<Self>> {
+        let accounts = engine.accounts();
+        let folders = engine.folders();
+        let messages = engine.messages();
+        let body_store = engine.body_store();
+        let sender = engine.sender();
+        let prefetch_days = settings.int("sync-body-prefetch-days").max(0) as u32;
+
         let goa = Arc::new(tokio::sync::Mutex::new(GoaClient::new().await?));
         let pool = Arc::new(SyncTaskPool::new(Arc::clone(&goa)));
 
@@ -75,7 +80,7 @@ impl SyncEngine {
             body_priority_rx,
             body_background_rx,
             Arc::clone(&pool),
-            Arc::clone(&body_store),
+            body_store,
             sender.clone(),
             Arc::clone(&imap_configs),
             Arc::clone(&provider_types),
