@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::{debug, error, info, warn};
 
@@ -17,6 +18,7 @@ use crate::event_bus::EventSender;
 use crate::goa::types::{GoaMailAccount, ImapConfig, TlsMode};
 use crate::goa::GoaClient;
 use crate::sync::body_worker::{BodyWorker, FetchBodyRequest};
+use crate::sync::idle::IdleManager;
 use crate::sync::imap::ImapFolder;
 use crate::sync::pool::{max_connections_for_provider, SyncTaskPool};
 
@@ -51,6 +53,10 @@ pub struct SyncEngine {
     body_background_tx: mpsc::Sender<FetchBodyRequest>,
     /// Number of days of message bodies to prefetch. 0 = disabled.
     prefetch_days: u32,
+    /// Poll interval for servers without IDLE support.
+    poll_interval_minutes: u32,
+    /// IDLE manager — started after initial sync completes.
+    idle_manager: tokio::sync::Mutex<IdleManager>,
 }
 
 impl SyncEngine {
@@ -65,6 +71,7 @@ impl SyncEngine {
         let body_store = engine.body_store();
         let sender = engine.sender();
         let prefetch_days = settings.int("sync-body-prefetch-days").max(0) as u32;
+        let poll_interval_minutes = settings.int("sync-poll-interval-minutes").max(1) as u32;
 
         let goa = Arc::new(tokio::sync::Mutex::new(GoaClient::new().await?));
         let pool = Arc::new(SyncTaskPool::new(Arc::clone(&goa)));
@@ -101,6 +108,8 @@ impl SyncEngine {
             body_priority_tx,
             body_background_tx,
             prefetch_days,
+            poll_interval_minutes,
+            idle_manager: tokio::sync::Mutex::new(IdleManager::new()),
         }))
     }
 
@@ -127,8 +136,24 @@ impl SyncEngine {
                     info!("Shutting down sync engine");
                     let engine = Arc::clone(&engine);
                     tokio::spawn(async move {
+                        engine.idle_manager.lock().await.shutdown();
                         engine.pool.shutdown().await;
                         engine.stop();
+                    });
+                }
+                AppEvent::IdleNotification { account_id, folder_name } => {
+                    let engine = Arc::clone(&engine);
+                    let account_id = account_id.clone();
+                    let folder_name = folder_name.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = engine.handle_idle_notification(&account_id, &folder_name).await {
+                            error!(
+                                account_id = %account_id,
+                                folder_name = %folder_name,
+                                error = %e,
+                                "IDLE-triggered sync failed"
+                            );
+                        }
                     });
                 }
                 AppEvent::MessageBodyRequested { account_id, folder_name, uid } => {
@@ -347,12 +372,14 @@ impl SyncEngine {
         }
 
         // Queue body prefetch for messages within the window that may be missing .eml files.
-        // The body worker will skip messages that already have files on disk.
         if self.prefetch_days > 0 {
             self.backfill_missing_bodies(&domain_accounts).await;
         }
 
-        info!("Initial sync complete");
+        // Start IDLE connections for real-time push notifications.
+        self.start_idle(&domain_accounts).await;
+
+        info!("Initial sync complete — IDLE active");
         Ok(())
     }
 
@@ -394,6 +421,129 @@ impl SyncEngine {
 
         if queued > 0 {
             info!(queued, prefetch_days = self.prefetch_days, "Queued body backfill");
+        }
+    }
+
+    /// Handle an IDLE or poll notification — run sync_folder for the specified folder.
+    async fn handle_idle_notification(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+    ) -> anyhow::Result<()> {
+        debug!(account_id, folder_name, "IDLE notification — running sync");
+
+        let config = {
+            let configs = self.imap_configs.read().await;
+            configs.get(account_id).cloned()
+        };
+        let config = match config {
+            Some(c) => c,
+            None => {
+                warn!(account_id, "No cached IMAP config for IDLE sync");
+                return Ok(());
+            }
+        };
+
+        let max_conns = {
+            let providers = self.provider_types.read().await;
+            providers
+                .get(account_id)
+                .map(|p| max_connections_for_provider(p))
+                .unwrap_or(10)
+        };
+
+        self.sync_folder(account_id, folder_name, &config, max_conns)
+            .await
+    }
+
+    /// Start IDLE connections for all accounts after initial sync completes.
+    async fn start_idle(&self, accounts: &[Account]) {
+        let mut idle_mgr = self.idle_manager.lock().await;
+        let poll_interval = Duration::from_secs(self.poll_interval_minutes as u64 * 60);
+
+        for account in accounts {
+            let folders = match self.folders.list_folders(&account.goa_id).await {
+                Ok(f) => f,
+                Err(e) => {
+                    error!(email = %account.email_address, error = %e, "Failed to list folders for IDLE");
+                    continue;
+                }
+            };
+
+            let folder_list: Vec<(String, Option<String>)> = folders
+                .iter()
+                .map(|f| (f.name.clone(), f.role.clone()))
+                .collect();
+
+            let config = {
+                let configs = self.imap_configs.read().await;
+                configs.get(&account.goa_id).cloned()
+            };
+            let config = match config {
+                Some(c) => c,
+                None => continue,
+            };
+
+            let max_conns = {
+                let providers = self.provider_types.read().await;
+                providers
+                    .get(&account.goa_id)
+                    .map(|p| max_connections_for_provider(p))
+                    .unwrap_or(10)
+            };
+
+            // Check IDLE capability
+            let supports_idle = match self.pool.acquire(&account.goa_id, &config, max_conns).await {
+                Ok(mut guard) => {
+                    match guard.session().capabilities().await {
+                        Ok(caps) => caps.has_str("IDLE"),
+                        Err(e) => {
+                            warn!(email = %account.email_address, error = %e, "Failed to check capabilities");
+                            guard.poison();
+                            false
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(email = %account.email_address, error = %e, "Failed to acquire connection for capability check");
+                    false
+                }
+            };
+
+            // IDLE budget: provider limit - 2 (reserve for pool operations)
+            let idle_budget = max_conns.saturating_sub(2).max(1);
+
+            info!(
+                email = %account.email_address,
+                supports_idle,
+                idle_budget,
+                "Configuring IDLE/poll for account"
+            );
+
+            // Build auth provider closure
+            let goa = Arc::clone(&self.goa);
+            let goa_id = account.goa_id.clone();
+            let auth_provider: crate::sync::idle::AuthProvider = Arc::new(move || {
+                let goa = Arc::clone(&goa);
+                let goa_id = goa_id.clone();
+                Box::pin(async move {
+                    let goa = goa.lock().await;
+                    goa.get_imap_auth(&goa_id)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))
+                })
+            });
+
+            idle_mgr.start_for_account(
+                &account.goa_id,
+                &folder_list,
+                config,
+                auth_provider,
+                idle_budget,
+                supports_idle,
+                poll_interval,
+                self.sender.clone(),
+            );
         }
     }
 

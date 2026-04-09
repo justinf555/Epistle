@@ -84,6 +84,13 @@ impl ImapSession {
         }
     }
 
+    pub async fn capabilities(&mut self) -> Result<async_imap::types::Capabilities, ImapError> {
+        match self {
+            Self::Tls(s) => Ok(s.capabilities().await?),
+            Self::Plain(s) => Ok(s.capabilities().await?),
+        }
+    }
+
     pub async fn uid_search(&mut self, query: &str) -> Result<std::collections::HashSet<u32>, ImapError> {
         match self {
             Self::Tls(s) => Ok(s.uid_search(query).await?),

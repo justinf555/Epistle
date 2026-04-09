@@ -60,6 +60,12 @@ pub enum AppEvent {
         body: MessageBody,
     },
 
+    /// IDLE or poll detected changes in a folder — trigger differential sync.
+    IdleNotification {
+        account_id: String,
+        folder_name: String,
+    },
+
     /// User selected a folder in the sidebar.
     FolderSelected {
         account_id: String,
