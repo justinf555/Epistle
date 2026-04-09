@@ -33,6 +33,10 @@ mod imp {
         pub is_read: Cell<bool>,
         #[property(get, set)]
         pub is_flagged: Cell<bool>,
+        /// Pre-computed sort key: Unix timestamp parsed from internal_date or date.
+        /// Avoids string parsing during binary search insertion.
+        #[property(get, set)]
+        pub sort_timestamp: Cell<i64>,
     }
 
     #[glib::object_subclass]
@@ -63,6 +67,10 @@ impl MessageObject {
         obj.set_preview(msg.preview.clone());
         obj.set_is_read(msg.is_read);
         obj.set_is_flagged(msg.is_flagged);
+        obj.set_sort_timestamp(parse_sort_timestamp(
+            msg.internal_date.as_deref(),
+            msg.date.as_deref(),
+        ));
         obj
     }
 
@@ -74,5 +82,22 @@ impl MessageObject {
         self.set_preview(msg.preview.clone());
         self.set_is_read(msg.is_read);
         self.set_is_flagged(msg.is_flagged);
+        self.set_sort_timestamp(parse_sort_timestamp(
+            msg.internal_date.as_deref(),
+            msg.date.as_deref(),
+        ));
+    }
+}
+
+/// Parse a date string into a Unix timestamp for sorting.
+/// Tries RFC 3339 first (from INTERNALDATE), then RFC 2822 (from ENVELOPE Date header).
+fn parse_sort_timestamp(internal_date: Option<&str>, date: Option<&str>) -> i64 {
+    let s = internal_date.or(date);
+    match s {
+        Some(d) => chrono::DateTime::parse_from_rfc3339(d)
+            .or_else(|_| chrono::DateTime::parse_from_rfc2822(d))
+            .map(|dt| dt.timestamp())
+            .unwrap_or(0),
+        None => 0,
     }
 }

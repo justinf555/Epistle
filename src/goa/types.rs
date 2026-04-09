@@ -61,10 +61,21 @@ impl ProviderType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum AuthMethod {
     XOAuth2 { token: String },
     Plain { username: String, password: String },
+}
+
+impl std::fmt::Debug for AuthMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthMethod::XOAuth2 { .. } => write!(f, "AuthMethod::XOAuth2(<redacted>)"),
+            AuthMethod::Plain { username, .. } => {
+                write!(f, "AuthMethod::Plain {{ username: {username:?}, password: <redacted> }}")
+            }
+        }
+    }
 }
 
 // ── Config Structs ──────────────────────────────────────────────────────────

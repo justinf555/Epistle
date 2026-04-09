@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
@@ -9,7 +10,7 @@ use crate::engine::traits::accounts::{Account, MailAccounts};
 use crate::engine::traits::folders::{Folder, MailFolders};
 use crate::engine::traits::messages::{MailMessages, Message};
 use crate::event_bus::EventSender;
-use crate::goa::types::{GoaMailAccount, TlsMode};
+use crate::goa::types::{GoaMailAccount, ImapConfig, TlsMode};
 use crate::goa::GoaClient;
 use crate::sync::imap::ImapFolder;
 
@@ -32,6 +33,8 @@ pub struct SyncEngine {
     sender: EventSender,
     pipeline: EmailPipeline,
     running: std::sync::atomic::AtomicBool,
+    /// Cached IMAP configs keyed by GOA account ID, populated after initial sync.
+    imap_configs: tokio::sync::RwLock<HashMap<String, ImapConfig>>,
 }
 
 impl SyncEngine {
@@ -51,16 +54,21 @@ impl SyncEngine {
             sender,
             pipeline: EmailPipeline::new(),
             running: std::sync::atomic::AtomicBool::new(false),
+            imap_configs: tokio::sync::RwLock::new(HashMap::new()),
         }))
     }
 
     /// Start the sync service. Subscribes to lifecycle events and reacts.
+    /// Must only be called once — guarded by `running` flag.
     pub fn start(self: &Arc<Self>) {
-        self.running.store(true, std::sync::atomic::Ordering::Relaxed);
+        if self.running.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            tracing::warn!("SyncEngine::start() called more than once — ignoring");
+            return;
+        }
         let engine = Arc::clone(self);
         crate::event_bus::subscribe(move |event| {
             match event {
-                AppEvent::AppStarted if engine.running.load(std::sync::atomic::Ordering::Relaxed) => {
+                AppEvent::AppStarted if engine.running.load(std::sync::atomic::Ordering::Acquire) => {
                     let engine = Arc::clone(&engine);
                     tokio::spawn(async move {
                         if let Err(e) = engine.run_initial_sync().await {
@@ -96,7 +104,7 @@ impl SyncEngine {
 
     /// Stop the sync service. Events will be ignored until start() is called again.
     pub fn stop(&self) {
-        self.running.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.running.store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// Run account discovery + folder sync for all accounts.
@@ -123,6 +131,19 @@ impl SyncEngine {
         // Persist accounts — MailEngine emits AccountsChanged if data changed
         debug!("Persisting accounts to database");
         self.accounts.sync_accounts(&domain_accounts).await?;
+
+        // Cache IMAP configs for later use by fetch_and_cache_body
+        {
+            let mut configs = self.imap_configs.write().await;
+            configs.clear();
+            for goa_account in &goa_accounts {
+                configs.insert(
+                    goa_account.goa_id.clone(),
+                    goa_account.imap_config.clone(),
+                );
+            }
+            debug!(count = configs.len(), "Cached IMAP configs");
+        }
 
         // Get IMAP credentials for all accounts (requires GOA lock)
         let mut imap_tasks = Vec::new();
@@ -342,17 +363,31 @@ impl SyncEngine {
             }
         }
 
-        // Get IMAP config + auth
-        let mut goa = self.goa.lock().await;
-        let goa_accounts = goa.discover_accounts().await?;
-        let goa_account = goa_accounts
-            .iter()
-            .find(|a| a.goa_id == account_id)
-            .ok_or_else(|| anyhow::anyhow!("Account {account_id} not found in GOA"))?;
+        // Get IMAP config from cache (populated during initial sync)
+        let config = {
+            let configs = self.imap_configs.read().await;
+            configs.get(account_id).cloned()
+        };
+        let config = match config {
+            Some(c) => c,
+            None => {
+                // Cache miss — re-discover from GOA (e.g. new account added)
+                warn!(account_id, "IMAP config not cached, re-discovering from GOA");
+                let mut goa = self.goa.lock().await;
+                let goa_accounts = goa.discover_accounts().await?;
+                let goa_account = goa_accounts
+                    .iter()
+                    .find(|a| a.goa_id == account_id)
+                    .ok_or_else(|| anyhow::anyhow!("Account {account_id} not found in GOA"))?;
+                let c = goa_account.imap_config.clone();
+                // Update cache
+                self.imap_configs.write().await.insert(account_id.to_string(), c.clone());
+                c
+            }
+        };
 
-        let auth = goa.get_imap_auth(account_id).await?;
-        let config = goa_account.imap_config.clone();
-        drop(goa); // Release GOA lock before IMAP I/O
+        // Get fresh auth credentials (tokens may have short TTL)
+        let auth = self.goa.lock().await.get_imap_auth(account_id).await?;
 
         // Fetch from IMAP
         let raw_bytes = crate::sync::imap::fetch_message_body(&config, &auth, folder_name, uid).await?;

@@ -224,34 +224,20 @@ impl EpistleMessageList {
 
         for msg in messages {
             let item = MessageObject::new(msg);
-            let item_date: Option<String> = item
-                .internal_date()
-                .or_else(|| item.date())
-                .map(|s| s.to_string());
+            let uid = item.uid();
 
-            // Binary search for insertion point (store is sorted newest-first)
-            let pos = find_insert_position(store, &item_date);
+            // Binary search for insertion point (store is sorted newest-first by timestamp)
+            let pos = find_insert_position(store, item.sort_timestamp());
+
+            // Shift all existing index entries at or after the insertion point
+            for val in index.values_mut() {
+                if *val >= pos {
+                    *val += 1;
+                }
+            }
 
             store.insert(pos, &item);
-            index.insert(item.uid(), pos);
-
-            // Shift existing index entries at or after this position
-            for val in index.values_mut() {
-                if *val >= pos && *val != pos {
-                    // Only shift entries that were there before (not the one we just inserted)
-                    // This is the entry we just inserted, skip
-                }
-            }
-        }
-
-        // Rebuild index after insertions (positions may have shifted)
-        if !messages.is_empty() {
-            index.clear();
-            for i in 0..store.n_items() {
-                if let Some(obj) = store.item(i).and_downcast::<MessageObject>() {
-                    index.insert(obj.uid(), i);
-                }
-            }
+            index.insert(uid, pos);
         }
 
         if store.n_items() > 0 {
@@ -314,8 +300,8 @@ impl EpistleMessageList {
 }
 
 /// Binary search for the insertion point in a newest-first sorted store.
-/// Returns the position where an item with the given date should be inserted.
-fn find_insert_position(store: &gio::ListStore, item_date: &Option<String>) -> u32 {
+/// Uses pre-computed Unix timestamps for correct ordering regardless of date format.
+fn find_insert_position(store: &gio::ListStore, timestamp: i64) -> u32 {
     let n = store.n_items();
     if n == 0 {
         return 0;
@@ -327,15 +313,12 @@ fn find_insert_position(store: &gio::ListStore, item_date: &Option<String>) -> u
     while low < high {
         let mid = low + (high - low) / 2;
         let mid_obj = store.item(mid).and_downcast::<MessageObject>().unwrap();
-        let mid_date: Option<String> = mid_obj
-            .internal_date()
-            .or_else(|| mid_obj.date())
-            .map(|s| s.to_string());
+        let mid_ts = mid_obj.sort_timestamp();
 
         // Store is sorted descending (newest first).
-        // If item_date >= mid_date, insert before mid (go left).
-        // If item_date < mid_date, insert after mid (go right).
-        if *item_date >= mid_date {
+        // If timestamp >= mid, insert before mid (go left).
+        // If timestamp < mid, insert after mid (go right).
+        if timestamp >= mid_ts {
             high = mid;
         } else {
             low = mid + 1;

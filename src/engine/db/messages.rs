@@ -193,7 +193,8 @@ impl Database {
         if uids.is_empty() {
             return Ok(vec![]);
         }
-        // Build placeholder list for IN clause
+        // Dynamic SQL: sqlx compile-time verification not possible for variable-length
+        // IN clauses. Generates a new prepared statement per unique UID count.
         let placeholders: Vec<String> = uids.iter().map(|_| "?".to_string()).collect();
         let sql = format!(
             "SELECT id, account_id, folder_name, uid, message_id, subject, sender,

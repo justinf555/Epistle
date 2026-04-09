@@ -77,6 +77,9 @@ mod imp {
         fn shutdown(&self) {
             if let Some(engine) = self.engine.get() {
                 engine.sender().send(AppEvent::AppShutdown);
+                // Drain synchronously — the GLib main loop is exiting and
+                // idle callbacks will no longer fire.
+                engine.bus().drain();
             }
             self.parent_shutdown();
         }

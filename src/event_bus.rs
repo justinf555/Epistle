@@ -79,6 +79,14 @@ impl EventBus {
         }
     }
 
+    /// Synchronously drain all pending events on the current thread.
+    ///
+    /// Used during shutdown when the GLib main loop is exiting and
+    /// idle callbacks will no longer fire.
+    pub fn drain(&self) {
+        drain_events();
+    }
+
     /// Register a subscriber callback. Called on the GTK main thread.
     ///
     /// The subscriber receives every event — use `match` to filter.
