@@ -24,10 +24,24 @@ pub enum AppEvent {
         folders: Vec<Folder>,
     },
 
-    /// Message sync completed for one folder.
-    MessagesChanged {
+    /// New messages added to a folder.
+    MessagesAdded {
         account_id: String,
         folder_name: String,
         messages: Vec<Message>,
+    },
+
+    /// Existing messages updated (flags, preview, etc.) in a folder.
+    MessagesUpdated {
+        account_id: String,
+        folder_name: String,
+        messages: Vec<Message>,
+    },
+
+    /// Messages removed from a folder.
+    MessagesRemoved {
+        account_id: String,
+        folder_name: String,
+        uids: Vec<u32>,
     },
 }

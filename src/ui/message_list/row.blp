@@ -1,0 +1,57 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $EpistleMessageRow : Gtk.Widget {
+  Gtk.Box {
+    orientation: horizontal;
+    spacing: 8;
+    margin-top: 8;
+    margin-bottom: 8;
+    margin-start: 12;
+    margin-end: 12;
+
+    Adw.Avatar avatar {
+      size: 32;
+      show-initials: true;
+    }
+
+    Gtk.Box {
+      orientation: vertical;
+      spacing: 2;
+      hexpand: true;
+
+      Gtk.Box {
+        orientation: horizontal;
+
+        Gtk.Label sender_label {
+          xalign: 0;
+          ellipsize: end;
+          hexpand: true;
+        }
+
+        Gtk.Label time_label {
+          xalign: 1;
+          styles ["dim-label", "caption"]
+        }
+      }
+
+      Gtk.Label subject_label {
+        xalign: 0;
+        ellipsize: end;
+      }
+
+      Gtk.Label preview_label {
+        xalign: 0;
+        ellipsize: end;
+        visible: false;
+        styles ["dim-label", "caption"]
+      }
+    }
+
+    Gtk.Image star_icon {
+      icon-name: "starred-symbolic";
+      visible: false;
+      styles ["warning"]
+    }
+  }
+}

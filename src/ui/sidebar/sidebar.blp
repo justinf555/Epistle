@@ -1,0 +1,28 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $EpistleSidebar : Adw.NavigationPage {
+  title: _("Folders");
+
+  child: Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {
+      show-title: false;
+
+      [start]
+      Gtk.Button compose_btn {
+        icon-name: "mail-message-new-symbolic";
+        tooltip-text: _("Compose");
+      }
+
+      [end]
+      Gtk.MenuButton menu_btn {
+        primary: true;
+        icon-name: "open-menu-symbolic";
+        tooltip-text: _("Main Menu");
+      }
+    }
+
+    content: Adw.Sidebar sidebar {};
+  };
+}

@@ -1,0 +1,40 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $EpistleMessageList : Adw.NavigationPage {
+  title: _("Messages");
+
+  child: Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {
+      [start]
+      Gtk.ToggleButton sidebar_toggle {
+        icon-name: "sidebar-show-symbolic";
+        tooltip-text: _("Toggle Sidebar");
+        active: true;
+      }
+    }
+
+    content: Gtk.Stack stack {
+      Gtk.StackPage {
+        name: "empty";
+        child: Adw.StatusPage empty_page {
+          icon-name: "mail-inbox-symbolic";
+          title: _("No Messages");
+          description: _("Select a folder to view messages.");
+        };
+      }
+
+      Gtk.StackPage {
+        name: "list";
+        child: Gtk.ScrolledWindow {
+          vexpand: true;
+          child: Gtk.ListView list_view {
+            single-click-activate: false;
+            styles ["navigation-sidebar"]
+          };
+        };
+      }
+    };
+  };
+}

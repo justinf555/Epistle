@@ -68,7 +68,7 @@ mod imp {
 
             let window = application.active_window().unwrap_or_else(|| {
                 let window = EpistleWindow::new(&*application);
-                window.set_engine(engine.accounts(), engine.folders());
+                window.set_engine(engine.accounts(), engine.folders(), engine.messages());
                 window.upcast()
             });
             window.present();
