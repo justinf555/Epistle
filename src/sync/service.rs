@@ -310,6 +310,10 @@ impl SyncEngine {
 
         futures::future::join_all(futures).await;
 
+        // Start IDLE immediately after folder discovery — don't wait for
+        // message sync to complete. IDLE on Inbox should be active ASAP.
+        self.start_idle(&domain_accounts).await;
+
         // ── Sync messages for all folders ────────────────────────────────
         // Two-stage pipeline per folder:
         //   Stage 1 (ID sync): uid_search → diff → delete removed
@@ -376,10 +380,7 @@ impl SyncEngine {
             self.backfill_missing_bodies(&domain_accounts).await;
         }
 
-        // Start IDLE connections for real-time push notifications.
-        self.start_idle(&domain_accounts).await;
-
-        info!("Initial sync complete — IDLE active");
+        info!("Initial sync complete");
         Ok(())
     }
 
