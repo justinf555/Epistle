@@ -84,6 +84,13 @@ impl ImapSession {
         }
     }
 
+    pub async fn capabilities(&mut self) -> Result<async_imap::types::Capabilities, ImapError> {
+        match self {
+            Self::Tls(s) => Ok(s.capabilities().await?),
+            Self::Plain(s) => Ok(s.capabilities().await?),
+        }
+    }
+
     pub async fn uid_search(&mut self, query: &str) -> Result<std::collections::HashSet<u32>, ImapError> {
         match self {
             Self::Tls(s) => Ok(s.uid_search(query).await?),
@@ -132,18 +139,27 @@ impl PooledConnection {
 
 // ── AccountPool ────────────────────────────────────────────────────────────
 
+/// Number of connections reserved for priority operations (user-initiated body fetch).
+const RESERVED_PRIORITY_CONNECTIONS: usize = 2;
+
 /// Pool of IMAP connections for a single account.
 struct AccountPool {
     account_id: String,
+    /// Semaphore for general (background) operations.
     semaphore: Arc<Semaphore>,
+    /// Semaphore for priority (user-initiated) operations — always has permits.
+    priority_semaphore: Arc<Semaphore>,
     idle_connections: std::sync::Mutex<Vec<PooledConnection>>,
 }
 
 impl AccountPool {
     fn new(account_id: String, max_connections: usize) -> Self {
+        let reserved = RESERVED_PRIORITY_CONNECTIONS.min(max_connections.saturating_sub(1));
+        let general = max_connections.saturating_sub(reserved);
         Self {
             account_id,
-            semaphore: Arc::new(Semaphore::new(max_connections)),
+            semaphore: Arc::new(Semaphore::new(general)),
+            priority_semaphore: Arc::new(Semaphore::new(reserved)),
             idle_connections: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -286,6 +302,55 @@ impl SyncTaskPool {
         let session = crate::sync::imap::connect(config, &auth).await?;
 
         debug!(account_id, host = %config.host, "Created new pooled IMAP connection");
+
+        Ok(ConnectionGuard {
+            connection: Some(PooledConnection::new(session)),
+            pool: account_pool,
+            _permit: permit,
+            poisoned: false,
+        })
+    }
+
+    /// Acquire a priority connection — uses reserved permits that are never
+    /// blocked by background sync operations.
+    pub async fn acquire_priority(
+        &self,
+        account_id: &str,
+        config: &ImapConfig,
+        max_connections: usize,
+    ) -> Result<ConnectionGuard, ImapError> {
+        let account_pool = self.get_or_create_pool(account_id, max_connections);
+
+        let permit = account_pool
+            .priority_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("priority semaphore closed");
+
+        // Try to reuse an idle connection
+        if let Some(mut conn) = account_pool.take_idle() {
+            match conn.session.noop().await {
+                Ok(()) => {
+                    debug!(account_id, "Reusing pooled connection (priority)");
+                    return Ok(ConnectionGuard {
+                        connection: Some(conn),
+                        pool: account_pool,
+                        _permit: permit,
+                        poisoned: false,
+                    });
+                }
+                Err(e) => {
+                    debug!(account_id, error = %e, "Pooled connection failed health check (priority)");
+                }
+            }
+        }
+
+        let auth = self.goa.lock().await.get_imap_auth(account_id).await
+            .map_err(|e| ImapError::Auth(e.to_string()))?;
+        let session = crate::sync::imap::connect(config, &auth).await?;
+
+        debug!(account_id, host = %config.host, "Created new pooled connection (priority)");
 
         Ok(ConnectionGuard {
             connection: Some(PooledConnection::new(session)),

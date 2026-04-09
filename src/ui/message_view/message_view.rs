@@ -35,6 +35,9 @@ mod imp {
         /// HTML body served by the `epistle:` URI scheme handler.
         pub(super) current_html: Rc<RefCell<String>>,
 
+        /// Timestamp of when body was requested (for latency measurement).
+        pub(super) body_request_time: RefCell<Option<std::time::Instant>>,
+
         // Header widgets (added dynamically to content_box)
         pub(super) header_box: std::cell::OnceCell<gtk::Box>,
         pub(super) subject_label: std::cell::OnceCell<gtk::Label>,
@@ -160,6 +163,9 @@ impl EpistleMessageView {
             .expect("sender set before use")
             .clone();
 
+        let t = std::time::Instant::now();
+        *self.imp().body_request_time.borrow_mut() = Some(t);
+
         tracing::debug!(uid, "Requesting body fetch");
         sender.send(AppEvent::MessageBodyRequested {
             account_id: account_id.to_string(),
@@ -207,7 +213,9 @@ impl EpistleMessageView {
                         && *imp.current_account_id.borrow() == *account_id
                         && *imp.current_folder.borrow() == *folder_name
                     {
-                        tracing::debug!(uid, "Body fetched, rendering");
+                        let latency = view.imp().body_request_time.borrow()
+                            .map(|t| t.elapsed().as_millis() as u64);
+                        tracing::debug!(uid, latency_ms = ?latency, "Body fetched, rendering");
                         view.render_body(body);
                     }
                 }

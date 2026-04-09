@@ -92,6 +92,22 @@ pub trait MailMessages: Send + Sync {
         offset: u32,
     ) -> anyhow::Result<Vec<Message>>;
 
+    /// Mark a message as having its body downloaded (.eml on disk).
+    async fn mark_body_downloaded(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+    ) -> anyhow::Result<()>;
+
+    /// Get uuid + uid for messages within the prefetch window missing bodies.
+    async fn list_missing_bodies(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        since: &str,
+    ) -> anyhow::Result<Vec<(String, u32)>>;
+
     /// Get the UUID for a message by its IMAP UID.
     async fn get_uuid(
         &self,
@@ -114,6 +130,18 @@ pub trait MailMessages: Send + Sync {
         account_id: &str,
         folder_name: &str,
     ) -> anyhow::Result<std::collections::HashSet<u32>>;
+
+    /// Update flags for a single message by UID. Emits MessagesUpdated if changed.
+    async fn update_flags(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+        is_read: bool,
+        is_flagged: bool,
+        is_answered: bool,
+        is_draft: bool,
+    ) -> anyhow::Result<bool>;
 
     /// Remove messages by UID. Emits MessagesRemoved.
     async fn delete_messages_by_uids(

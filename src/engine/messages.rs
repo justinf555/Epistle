@@ -177,6 +177,25 @@ impl MailMessages for MailMessagesImpl {
             .collect())
     }
 
+    async fn mark_body_downloaded(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+    ) -> anyhow::Result<()> {
+        Ok(self.db.mark_body_downloaded(account_id, folder_name, uid).await?)
+    }
+
+    async fn list_missing_bodies(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        since: &str,
+    ) -> anyhow::Result<Vec<(String, u32)>> {
+        let rows = self.db.list_missing_bodies(account_id, folder_name, since).await?;
+        Ok(rows.into_iter().map(|(uuid, uid)| (uuid, uid as u32)).collect())
+    }
+
     async fn get_uuid(
         &self,
         account_id: &str,
@@ -192,6 +211,39 @@ impl MailMessages for MailMessagesImpl {
         folder_name: &str,
     ) -> anyhow::Result<HashSet<u32>> {
         Ok(self.db.list_local_uids(account_id, folder_name).await?)
+    }
+
+    async fn update_flags(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+        is_read: bool,
+        is_flagged: bool,
+        is_answered: bool,
+        is_draft: bool,
+    ) -> anyhow::Result<bool> {
+        let changed = self
+            .db
+            .update_flags(account_id, folder_name, uid, is_read, is_flagged, is_answered, is_draft)
+            .await?;
+
+        if changed {
+            let rows = self
+                .db
+                .list_messages_by_uids(account_id, folder_name, &[uid])
+                .await?;
+            if let Some(row) = rows.into_iter().next() {
+                let msg = row_to_message(row);
+                self.sender.send(AppEvent::MessagesUpdated {
+                    account_id: account_id.to_string(),
+                    folder_name: folder_name.to_string(),
+                    messages: vec![msg],
+                });
+            }
+        }
+
+        Ok(changed)
     }
 
     async fn delete_messages_by_uids(
