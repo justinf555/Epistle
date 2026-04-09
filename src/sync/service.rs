@@ -151,6 +151,12 @@ impl SyncEngine {
         futures::future::join_all(futures).await;
 
         // ── Phase 1: Fetch messages from inbox ─────────────────────────────
+        // Currently inbox-only to avoid IMAP throttling on initial sync.
+        // To expand to other folders: iterate the synced folders list, prioritise
+        // by role (inbox → sent → drafts → etc.), and call fetch_messages() for
+        // each. The fetch_messages() and sync_messages() APIs already accept any
+        // folder name — only this call site is inbox-specific.
+        //
         // Re-acquire IMAP credentials for message fetch (tokens may have refreshed)
         let mut inbox_tasks = Vec::new();
         {
