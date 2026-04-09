@@ -22,6 +22,9 @@ pub enum ImapError {
 
     #[error("authentication failed: {0}")]
     Auth(String),
+
+    #[error("message not found: UID {uid}")]
+    MessageNotFound { uid: u32 },
 }
 
 /// A folder discovered from IMAP LIST.
@@ -42,7 +45,10 @@ pub async fn discover_folders(
     match config.tls_mode {
         TlsMode::Implicit => discover_implicit(config, auth).await,
         TlsMode::StartTls => discover_starttls(config, auth).await,
-        TlsMode::None => discover_plain(config, auth).await,
+        TlsMode::None => {
+            tracing::warn!(host = %config.host, "Connecting to IMAP without TLS — credentials will be sent in plaintext");
+            discover_plain(config, auth).await
+        }
     }
 }
 
@@ -207,7 +213,10 @@ pub async fn fetch_messages(
     match config.tls_mode {
         TlsMode::Implicit => fetch_messages_implicit(config, auth, folder, batch_size).await,
         TlsMode::StartTls => fetch_messages_starttls(config, auth, folder, batch_size).await,
-        TlsMode::None => fetch_messages_plain(config, auth, folder, batch_size).await,
+        TlsMode::None => {
+            tracing::warn!(host = %config.host, "Connecting to IMAP without TLS — credentials will be sent in plaintext");
+            fetch_messages_plain(config, auth, folder, batch_size).await
+        }
     }
 }
 
@@ -394,7 +403,10 @@ pub async fn fetch_message_body(
     match config.tls_mode {
         TlsMode::Implicit => fetch_body_implicit(config, auth, folder, uid).await,
         TlsMode::StartTls => fetch_body_starttls(config, auth, folder, uid).await,
-        TlsMode::None => fetch_body_plain(config, auth, folder, uid).await,
+        TlsMode::None => {
+            tracing::warn!(host = %config.host, "Connecting to IMAP without TLS — credentials will be sent in plaintext");
+            fetch_body_plain(config, auth, folder, uid).await
+        }
     }
 }
 
@@ -487,7 +499,7 @@ where
         }
     }
 
-    Err(ImapError::Auth(format!("No body returned for UID {uid}")))
+    Err(ImapError::MessageNotFound { uid })
 }
 
 /// XOAUTH2 SASL authenticator for OAuth providers (Gmail, Microsoft).

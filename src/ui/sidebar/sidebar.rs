@@ -174,7 +174,15 @@ impl EpistleSidebar {
     fn on_accounts_changed(&self, accounts: &[Account]) {
         let sidebar = &*self.imp().sidebar;
 
+        // Build set of existing section titles to avoid duplicates
+        let existing: std::collections::HashSet<String> = (0..sidebar.sections().n_items())
+            .filter_map(|i| sidebar.section(i)?.title().map(|t| t.to_string()))
+            .collect();
+
         for account in accounts {
+            if existing.contains(&account.email_address) {
+                continue;
+            }
             let section = adw::SidebarSection::new();
             section.set_title(Some(&account.email_address));
             sidebar.append(section);
