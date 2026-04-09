@@ -462,9 +462,9 @@ impl SyncEngine {
         };
 
         // Check if .eml already exists on disk
-        if self.body_store.has_eml(&uuid).await {
+        if self.body_store.has_eml(account_id, &uuid).await {
             debug!(uid, uuid = %uuid, "Body already on disk, parsing from file");
-            if let Some(raw) = self.body_store.read_eml(&uuid).await? {
+            if let Some(raw) = self.body_store.read_eml(account_id, &uuid).await? {
                 let body = parse_mime_body(&raw);
                 self.sender.send(AppEvent::MessageBodyFetched {
                     account_id: account_id.to_string(),
@@ -529,7 +529,7 @@ impl SyncEngine {
             .ok_or_else(|| crate::sync::imap::ImapError::MessageNotFound { uid })?;
 
         // Store .eml to filesystem
-        self.body_store.store_eml(&uuid, &raw_bytes).await
+        self.body_store.store_eml(account_id, &uuid, &raw_bytes).await
             .map_err(|e| anyhow::anyhow!("Failed to store .eml: {e}"))?;
 
         // Parse MIME and emit event

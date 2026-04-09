@@ -50,7 +50,7 @@ impl MailEngine {
         let db = Database::open(&db_path).await?;
 
         let body_store = Arc::new(
-            BodyStore::open(data_dir.join("bodies"))
+            BodyStore::open(data_dir.join("messages"))
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to open body store: {e}"))?,
         );
