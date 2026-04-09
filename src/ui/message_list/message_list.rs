@@ -264,13 +264,17 @@ impl EpistleMessageList {
         tracing::debug!(updated = messages.len(), "Messages updated");
     }
 
-    /// O(k) — remove messages by UID via index lookup.
+    /// Remove messages by UID.
+    ///
+    /// UID lookups are O(1) via the index. Store removals are O(k) where k = removed count.
+    /// Index rebuild is O(n) over the full store — chosen over per-removal shift (O(k·n))
+    /// because bulk expunge during sync makes the rebuild cheaper for k > 1.
     fn on_messages_removed(&self, uids: &[u32]) {
         let imp = self.imp();
         let store = imp.store.get().expect("store initialized");
         let mut index = imp.uid_index.borrow_mut();
 
-        // Collect positions to remove (sorted descending to preserve indices)
+        // Collect positions to remove (sorted descending to preserve indices during removal)
         let mut positions: Vec<u32> = uids
             .iter()
             .filter_map(|uid| index.remove(uid))
@@ -281,7 +285,7 @@ impl EpistleMessageList {
             store.remove(*pos);
         }
 
-        // Rebuild index after removals shifted positions
+        // Rebuild index: O(n) is cheaper than per-removal shift O(k·n) for bulk expunge
         if !positions.is_empty() {
             index.clear();
             for i in 0..store.n_items() {
@@ -312,7 +316,10 @@ fn find_insert_position(store: &gio::ListStore, timestamp: i64) -> u32 {
 
     while low < high {
         let mid = low + (high - low) / 2;
-        let mid_obj = store.item(mid).and_downcast::<MessageObject>().unwrap();
+        let mid_obj = store
+            .item(mid)
+            .and_downcast::<MessageObject>()
+            .expect("ListStore contains only MessageObject");
         let mid_ts = mid_obj.sort_timestamp();
 
         // Store is sorted descending (newest first).

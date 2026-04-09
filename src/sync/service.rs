@@ -373,14 +373,16 @@ impl SyncEngine {
             None => {
                 // Cache miss — re-discover from GOA (e.g. new account added)
                 warn!(account_id, "IMAP config not cached, re-discovering from GOA");
-                let mut goa = self.goa.lock().await;
-                let goa_accounts = goa.discover_accounts().await?;
-                let goa_account = goa_accounts
-                    .iter()
-                    .find(|a| a.goa_id == account_id)
-                    .ok_or_else(|| anyhow::anyhow!("Account {account_id} not found in GOA"))?;
-                let c = goa_account.imap_config.clone();
-                // Update cache
+                let c = {
+                    let mut goa = self.goa.lock().await;
+                    let goa_accounts = goa.discover_accounts().await?;
+                    goa_accounts
+                        .iter()
+                        .find(|a| a.goa_id == account_id)
+                        .map(|a| a.imap_config.clone())
+                        .ok_or_else(|| anyhow::anyhow!("Account {account_id} not found in GOA"))?
+                    // goa guard dropped here
+                };
                 self.imap_configs.write().await.insert(account_id.to_string(), c.clone());
                 c
             }
