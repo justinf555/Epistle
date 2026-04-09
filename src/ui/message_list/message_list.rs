@@ -59,21 +59,11 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
 
-            // Create the model chain: ListStore → SortListModel → SingleSelection → ListView
+            // Create the model chain: ListStore → SingleSelection → ListView
+            // ListStore is kept in DB sort order (newest first). New messages are
+            // inserted at the correct position via binary search, not appended.
             let store = gio::ListStore::new::<MessageObject>();
-
-            // Sort by internal_date descending (newest first), fall back to date
-            let sorter = gtk::CustomSorter::new(move |a, b| {
-                let a = a.downcast_ref::<MessageObject>().unwrap();
-                let b = b.downcast_ref::<MessageObject>().unwrap();
-                let a_date = a.internal_date().or_else(|| a.date());
-                let b_date = b.internal_date().or_else(|| b.date());
-                // Reverse order: newest first
-                b_date.cmp(&a_date).into()
-            });
-            let sort_model = gtk::SortListModel::new(Some(store.clone()), Some(sorter));
-
-            let selection = gtk::SingleSelection::new(Some(sort_model));
+            let selection = gtk::SingleSelection::new(Some(store.clone()));
             self.list_view.set_model(Some(&selection));
             self.list_view.set_factory(Some(&factory::build_factory()));
             self.store.set(store).expect("store set once in constructed");
@@ -224,20 +214,43 @@ impl EpistleMessageList {
         });
     }
 
-    /// O(k) — insert new messages into the store.
+    /// O(k log n) — insert new messages at the correct sorted position.
+    /// Messages from DB arrive in sorted order (newest first). New messages
+    /// are typically newest, so insertion at position 0 is the common case.
     fn on_messages_added(&self, messages: &[Message]) {
         let imp = self.imp();
         let store = imp.store.get().expect("store initialized");
         let mut index = imp.uid_index.borrow_mut();
 
-        let new_items: Vec<MessageObject> = messages.iter().map(MessageObject::new).collect();
+        for msg in messages {
+            let item = MessageObject::new(msg);
+            let item_date: Option<String> = item
+                .internal_date()
+                .or_else(|| item.date())
+                .map(|s| s.to_string());
 
-        if !new_items.is_empty() {
-            let insert_pos = store.n_items();
-            store.splice(insert_pos, 0, &new_items);
+            // Binary search for insertion point (store is sorted newest-first)
+            let pos = find_insert_position(store, &item_date);
 
-            for (i, item) in new_items.iter().enumerate() {
-                index.insert(item.uid(), insert_pos + i as u32);
+            store.insert(pos, &item);
+            index.insert(item.uid(), pos);
+
+            // Shift existing index entries at or after this position
+            for val in index.values_mut() {
+                if *val >= pos && *val != pos {
+                    // Only shift entries that were there before (not the one we just inserted)
+                    // This is the entry we just inserted, skip
+                }
+            }
+        }
+
+        // Rebuild index after insertions (positions may have shifted)
+        if !messages.is_empty() {
+            index.clear();
+            for i in 0..store.n_items() {
+                if let Some(obj) = store.item(i).and_downcast::<MessageObject>() {
+                    index.insert(obj.uid(), i);
+                }
             }
         }
 
@@ -298,4 +311,36 @@ impl EpistleMessageList {
 
         tracing::debug!(removed = uids.len(), total = store.n_items(), "Messages removed");
     }
+}
+
+/// Binary search for the insertion point in a newest-first sorted store.
+/// Returns the position where an item with the given date should be inserted.
+fn find_insert_position(store: &gio::ListStore, item_date: &Option<String>) -> u32 {
+    let n = store.n_items();
+    if n == 0 {
+        return 0;
+    }
+
+    let mut low: u32 = 0;
+    let mut high: u32 = n;
+
+    while low < high {
+        let mid = low + (high - low) / 2;
+        let mid_obj = store.item(mid).and_downcast::<MessageObject>().unwrap();
+        let mid_date: Option<String> = mid_obj
+            .internal_date()
+            .or_else(|| mid_obj.date())
+            .map(|s| s.to_string());
+
+        // Store is sorted descending (newest first).
+        // If item_date >= mid_date, insert before mid (go left).
+        // If item_date < mid_date, insert after mid (go right).
+        if *item_date >= mid_date {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+
+    low
 }
