@@ -46,8 +46,9 @@ pub struct SyncEngine {
     /// Priority body fetch channel (user-initiated).
     body_priority_tx: mpsc::Sender<FetchBodyRequest>,
     /// Background body fetch channel (header worker prefetch).
-    #[allow(dead_code)] // Used when prefetch is wired in Phase 5
     body_background_tx: mpsc::Sender<FetchBodyRequest>,
+    /// Number of days of message bodies to prefetch. 0 = disabled.
+    prefetch_days: u32,
 }
 
 impl SyncEngine {
@@ -58,6 +59,7 @@ impl SyncEngine {
         messages: Arc<dyn MailMessages>,
         body_store: Arc<BodyStore>,
         sender: EventSender,
+        prefetch_days: u32,
     ) -> anyhow::Result<Arc<Self>> {
         let goa = Arc::new(tokio::sync::Mutex::new(GoaClient::new().await?));
         let pool = Arc::new(SyncTaskPool::new(Arc::clone(&goa)));
@@ -93,6 +95,7 @@ impl SyncEngine {
             provider_types,
             body_priority_tx,
             body_background_tx,
+            prefetch_days,
         }))
     }
 
@@ -472,6 +475,29 @@ impl SyncEngine {
                     error = %e,
                     "Failed to persist messages"
                 );
+            }
+
+            // Queue body prefetch for messages within the prefetch window
+            let prefetch_days = self.prefetch_days;
+            if prefetch_days > 0 {
+                let cutoff = chrono::Utc::now() - chrono::Duration::days(prefetch_days as i64);
+                for msg in &messages {
+                    let within_window = msg
+                        .internal_date
+                        .as_deref()
+                        .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
+                        .map(|d| d >= cutoff)
+                        .unwrap_or(true); // prefetch if no date (be generous)
+
+                    if within_window {
+                        let _ = self.body_background_tx.try_send(FetchBodyRequest {
+                            uid: msg.uid,
+                            uuid: msg.uuid.clone(),
+                            account_id: account_id.to_string(),
+                            folder_name: folder_name.to_string(),
+                        });
+                    }
+                }
             }
 
             // guard dropped — connection returned to pool
