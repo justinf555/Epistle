@@ -188,13 +188,38 @@ impl EpistleMessageList {
             return;
         }
 
-        // Replace the store contents with new MessageObjects
-        let objects: Vec<MessageObject> = messages.iter().map(MessageObject::new).collect();
-        store.remove_all();
-        store.extend_from_slice(&objects);
+        // Build a map of incoming messages keyed by UID for efficient lookup
+        let incoming: std::collections::HashMap<u32, &Message> =
+            messages.iter().map(|m| (m.uid, m)).collect();
+
+        // Update existing items or mark for removal
+        let mut existing_uids = std::collections::HashSet::new();
+        let mut to_remove = Vec::new();
+        for i in 0..store.n_items() {
+            let obj = store.item(i).and_downcast::<MessageObject>().unwrap();
+            let uid = obj.uid();
+            if let Some(msg) = incoming.get(&uid) {
+                obj.update_from(msg);
+                existing_uids.insert(uid);
+            } else {
+                to_remove.push(i);
+            }
+        }
+
+        // Remove stale items (reverse order to keep indices valid)
+        for i in to_remove.into_iter().rev() {
+            store.remove(i);
+        }
+
+        // Append new items not already in the store
+        for msg in messages {
+            if !existing_uids.contains(&msg.uid) {
+                store.append(&MessageObject::new(msg));
+            }
+        }
 
         stack.set_visible_child_name("list");
 
-        tracing::debug!(count = messages.len(), "Message list model updated");
+        tracing::debug!(count = store.n_items(), "Message list model updated");
     }
 }
