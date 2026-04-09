@@ -26,8 +26,10 @@ pub struct Message {
     pub to_addresses: Vec<String>,
     /// Decoded Cc addresses.
     pub cc_addresses: Vec<String>,
-    /// Parsed date in ISO 8601 / RFC 3339 format.
+    /// Parsed date in ISO 8601 / RFC 3339 format (from sender's Date header).
     pub date: Option<String>,
+    /// Server-received date (IMAP INTERNALDATE) — used for sorting.
+    pub internal_date: Option<String>,
     /// In-Reply-To header (for threading).
     pub in_reply_to: Option<String>,
     /// References header (space-separated Message-IDs, for threading).
@@ -46,6 +48,19 @@ pub struct Message {
     pub content_type: Option<String>,
     /// Whether the message has attachments (from BODYSTRUCTURE or body).
     pub has_attachments: bool,
+
+    // ── Body content (fetched on demand, cached in DB) ──────────────────
+    /// Plain text body part.
+    pub body_text: Option<String>,
+    /// HTML body part.
+    pub body_html: Option<String>,
+}
+
+/// Extracted body content from a message.
+#[derive(Debug, Clone)]
+pub struct MessageBody {
+    pub body_text: Option<String>,
+    pub body_html: Option<String>,
 }
 
 // ── Trait ────────────────────────────────────────────────────────────────────
@@ -71,4 +86,22 @@ pub trait MailMessages: Send + Sync {
         account_id: &str,
         folder_name: &str,
     ) -> anyhow::Result<Vec<Message>>;
+
+    /// Cache the body content for a message after it's been fetched and parsed.
+    async fn cache_body(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+        body_text: Option<&str>,
+        body_html: Option<&str>,
+    ) -> anyhow::Result<()>;
+
+    /// Get cached body for a message. Returns None if not yet fetched.
+    async fn get_body(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+    ) -> anyhow::Result<Option<MessageBody>>;
 }

@@ -41,5 +41,9 @@ impl ProcessingStep for ExtractMetadata {
         if let Some(ref irt) = raw.in_reply_to {
             message.in_reply_to = Some(strip_angle_brackets(&decode_bytes(irt)));
         }
+
+        if let Some(ref idate) = raw.internal_date {
+            message.internal_date = Some(idate.clone());
+        }
     }
 }

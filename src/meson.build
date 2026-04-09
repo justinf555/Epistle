@@ -8,6 +8,7 @@ blueprints = custom_target(
     'ui/sidebar/sidebar.blp',
     'ui/message_list/message_list.blp',
     'ui/message_list/row.blp',
+    'ui/message_view/message_view.blp',
     'shortcuts-dialog.blp',
   ),
   output: '.',
