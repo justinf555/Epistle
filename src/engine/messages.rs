@@ -144,6 +144,20 @@ impl MailMessages for MailMessagesImpl {
         Ok(rows.into_iter().map(row_to_message).collect())
     }
 
+    async fn list_messages_page(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<Message>> {
+        let rows = self
+            .db
+            .list_messages_page(account_id, folder_name, limit, offset)
+            .await?;
+        Ok(rows.into_iter().map(row_to_message).collect())
+    }
+
     async fn cache_body(
         &self,
         account_id: &str,

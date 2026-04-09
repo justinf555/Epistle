@@ -203,24 +203,67 @@ impl EpistleMessageView {
             let Some(view) = weak.upgrade() else {
                 return;
             };
-            if let AppEvent::MessageBodyFetched {
-                account_id,
-                folder_name,
-                uid,
-                body,
-            } = event
-            {
-                let imp = view.imp();
-                // Only render if this is still the currently viewed message
-                if imp.current_uid.get() == *uid
-                    && *imp.current_account_id.borrow() == *account_id
-                    && *imp.current_folder.borrow() == *folder_name
-                {
-                    tracing::debug!(uid, "Body fetched, rendering");
-                    view.render_body(body);
+            match event {
+                AppEvent::FolderSelected { .. } => {
+                    view.reset();
                 }
+                AppEvent::MessageSelected {
+                    account_id,
+                    folder_name,
+                    uid,
+                    subject,
+                    sender,
+                    date,
+                } => {
+                    view.show_message(
+                        account_id,
+                        folder_name,
+                        *uid,
+                        subject.as_deref(),
+                        sender.as_deref(),
+                        date.as_deref(),
+                    );
+                }
+                AppEvent::MessageBodyFetched {
+                    account_id,
+                    folder_name,
+                    uid,
+                    body,
+                } => {
+                    let imp = view.imp();
+                    // Only render if this is still the currently viewed message
+                    if imp.current_uid.get() == *uid
+                        && *imp.current_account_id.borrow() == *account_id
+                        && *imp.current_folder.borrow() == *folder_name
+                    {
+                        tracing::debug!(uid, "Body fetched, rendering");
+                        view.render_body(body);
+                    }
+                }
+                _ => {}
             }
         });
+    }
+
+    /// Reset to empty state (e.g., when folder changes).
+    fn reset(&self) {
+        let imp = self.imp();
+        imp.current_uid.set(0);
+        *imp.current_account_id.borrow_mut() = String::new();
+        *imp.current_folder.borrow_mut() = String::new();
+        if let Some(label) = imp.subject_label.get() {
+            label.set_text("");
+        }
+        if let Some(label) = imp.from_label.get() {
+            label.set_text("");
+        }
+        if let Some(label) = imp.date_label.get() {
+            label.set_text("");
+        }
+        if let Some(wv) = imp.webview.borrow().as_ref() {
+            wv.load_html("", None);
+        }
+        imp.stack.set_visible_child_name("empty");
     }
 
     fn render_body(&self, body: &MessageBody) {

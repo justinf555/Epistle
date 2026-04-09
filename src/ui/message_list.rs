@@ -1,7 +1,7 @@
 mod factory;
+mod folder_cache;
 pub mod item;
 mod message_list;
 mod row;
 
-pub use item::MessageObject;
 pub use message_list::EpistleMessageList;

@@ -87,6 +87,15 @@ pub trait MailMessages: Send + Sync {
         folder_name: &str,
     ) -> anyhow::Result<Vec<Message>>;
 
+    /// Read a page of messages for a folder, ordered newest first.
+    async fn list_messages_page(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        limit: u32,
+        offset: u32,
+    ) -> anyhow::Result<Vec<Message>>;
+
     /// Cache the body content for a message after it's been fetched and parsed.
     async fn cache_body(
         &self,

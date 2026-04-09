@@ -27,7 +27,7 @@ template $EpistleMessageList : Adw.NavigationPage {
 
       Gtk.StackPage {
         name: "list";
-        child: Gtk.ScrolledWindow {
+        child: Gtk.ScrolledWindow scrolled_window {
           vexpand: true;
           child: Gtk.ListView list_view {
             single-click-activate: false;

@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use adw::prelude::*;
@@ -7,6 +9,7 @@ use gtk::glib;
 use epistle::app_event::AppEvent;
 use epistle::engine::traits::accounts::{Account, MailAccounts};
 use epistle::engine::traits::folders::{Folder, MailFolders};
+use epistle::event_bus::EventSender;
 
 mod imp {
     use super::*;
@@ -21,6 +24,9 @@ mod imp {
 
         pub(super) accounts: std::cell::OnceCell<Arc<dyn MailAccounts>>,
         pub(super) folders: std::cell::OnceCell<Arc<dyn MailFolders>>,
+        pub(super) sender: std::cell::OnceCell<EventSender>,
+        /// Maps (email_address, display_name) → (account_id, folder_name)
+        pub(super) folder_map: RefCell<HashMap<(String, String), (String, String)>>,
     }
 
     impl std::fmt::Debug for EpistleSidebar {
@@ -68,6 +74,7 @@ mod imp {
             self.parent_root();
             let obj = self.obj();
             obj.subscribe_events();
+            obj.wire_selection();
             obj.load_cached();
         }
 
@@ -117,10 +124,16 @@ impl EpistleSidebar {
     }
 
     /// Inject engine trait objects. Must be called before the widget is rooted.
-    pub fn set_engine(&self, accounts: Arc<dyn MailAccounts>, folders: Arc<dyn MailFolders>) {
+    pub fn set_engine(
+        &self,
+        accounts: Arc<dyn MailAccounts>,
+        folders: Arc<dyn MailFolders>,
+        sender: EventSender,
+    ) {
         let imp = self.imp();
         imp.accounts.set(accounts).ok().expect("accounts set once");
         imp.folders.set(folders).ok().expect("folders set once");
+        imp.sender.set(sender).ok().expect("sender set once");
     }
 
     fn subscribe_events(&self) {
@@ -134,11 +147,11 @@ impl EpistleSidebar {
                     sidebar.on_accounts_changed(accounts);
                 }
                 AppEvent::FoldersChanged {
+                    account_id,
                     email_address,
                     folders,
-                    ..
                 } => {
-                    sidebar.on_folders_changed(email_address, folders);
+                    sidebar.on_folders_changed(account_id, email_address, folders);
                 }
                 _ => {}
             }
@@ -164,7 +177,11 @@ impl EpistleSidebar {
             for account in &cached_accounts {
                 if let Ok(cached_folders) = folders.list_folders(&account.goa_id).await {
                     if !cached_folders.is_empty() {
-                        sidebar.on_folders_changed(&account.email_address, &cached_folders);
+                        sidebar.on_folders_changed(
+                            &account.goa_id,
+                            &account.email_address,
+                            &cached_folders,
+                        );
                     }
                 }
             }
@@ -189,8 +206,9 @@ impl EpistleSidebar {
         }
     }
 
-    fn on_folders_changed(&self, email_address: &str, folders: &[Folder]) {
-        let sidebar = &*self.imp().sidebar;
+    fn on_folders_changed(&self, account_id: &str, email_address: &str, folders: &[Folder]) {
+        let imp = self.imp();
+        let sidebar = &*imp.sidebar;
 
         let sections = sidebar.sections();
         for i in 0..sections.n_items() {
@@ -199,10 +217,15 @@ impl EpistleSidebar {
             };
             if section.title().as_deref() == Some(email_address) {
                 section.remove_all();
+                let mut map = imp.folder_map.borrow_mut();
                 for folder in folders {
                     let icon = icon_for_role(folder.role.as_deref());
                     let display_name =
                         display_name_for_folder(&folder.name, folder.role.as_deref());
+                    map.insert(
+                        (email_address.to_string(), display_name.clone()),
+                        (account_id.to_string(), folder.name.clone()),
+                    );
                     let item = adw::SidebarItem::builder()
                         .title(&display_name)
                         .icon_name(icon)
@@ -212,6 +235,40 @@ impl EpistleSidebar {
                 return;
             }
         }
+    }
+
+    fn wire_selection(&self) {
+        let imp = self.imp();
+        let sidebar_widget = imp.sidebar.clone();
+        let weak = self.downgrade();
+        sidebar_widget.connect_notify_local(Some("selected-item"), move |sidebar, _| {
+            let Some(this) = weak.upgrade() else {
+                return;
+            };
+            let Some(item) = sidebar.selected_item() else {
+                return;
+            };
+            let Some(section) = item.section() else {
+                return;
+            };
+            let Some(section_title) = section.title() else {
+                return;
+            };
+            let Some(item_title) = item.title().map(|t| t.to_string()) else {
+                return;
+            };
+            let imp = this.imp();
+            let map = imp.folder_map.borrow();
+            let key = (section_title.to_string(), item_title);
+            if let Some((account_id, folder_name)) = map.get(&key) {
+                if let Some(sender) = imp.sender.get() {
+                    sender.send(AppEvent::FolderSelected {
+                        account_id: account_id.clone(),
+                        folder_name: folder_name.clone(),
+                    });
+                }
+            }
+        });
     }
 }
 
