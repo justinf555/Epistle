@@ -25,6 +25,7 @@ pub struct FetchBodyRequest {
     pub uuid: String,
     pub account_id: String,
     pub folder_name: String,
+    pub priority: bool,
 }
 
 /// Body fetch worker that processes priority and background requests.
@@ -67,12 +68,14 @@ impl BodyWorker {
         loop {
             let request = tokio::select! {
                 biased;
-                Some(req) = self.priority_rx.recv() => {
+                Some(mut req) = self.priority_rx.recv() => {
                     debug!(uid = req.uid, uuid = %req.uuid, "Priority body request");
+                    req.priority = true;
                     req
                 }
-                Some(req) = self.background_rx.recv() => {
+                Some(mut req) = self.background_rx.recv() => {
                     debug!(uid = req.uid, uuid = %req.uuid, "Background body request");
+                    req.priority = false;
                     req
                 }
                 else => {
@@ -151,7 +154,11 @@ impl BodyWorker {
             "Fetching body from IMAP"
         );
         let t_imap_start = t0.elapsed();
-        let mut guard = self.pool.acquire(&req.account_id, &config, max_conns).await?;
+        let mut guard = if req.priority {
+            self.pool.acquire_priority(&req.account_id, &config, max_conns).await?
+        } else {
+            self.pool.acquire(&req.account_id, &config, max_conns).await?
+        };
         let t_pool = t0.elapsed();
         let session = guard.session();
 

@@ -221,6 +221,7 @@ impl SyncEngine {
                             uuid,
                             account_id,
                             folder_name,
+                            priority: true,
                         }).await {
                             error!(error = %e, "Failed to send priority body request");
                         }
@@ -455,6 +456,7 @@ impl SyncEngine {
                         uuid,
                         account_id: account.goa_id.clone(),
                         folder_name: folder.name.clone(),
+                        priority: false,
                     });
                     queued += 1;
                 }
@@ -788,6 +790,7 @@ impl SyncEngine {
                             uuid: msg.uuid.clone(),
                             account_id: account_id.to_string(),
                             folder_name: folder_name.to_string(),
+                            priority: false,
                         });
                     }
                 }
