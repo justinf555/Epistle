@@ -37,7 +37,6 @@ mod imp {
     #[derive(Debug, Default)]
     pub struct EpistleApplication {
         pub(super) engine: OnceCell<MailEngine>,
-        pub(super) activated: std::cell::Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -57,6 +56,12 @@ mod imp {
     }
 
     impl ApplicationImpl for EpistleApplication {
+        fn startup(&self) {
+            self.parent_startup();
+            let engine = self.engine.get().expect("engine set before startup");
+            engine.sender().send(AppEvent::AppStarted);
+        }
+
         fn activate(&self) {
             let application = self.obj();
             let engine = self.engine.get().expect("engine set before activate");
@@ -67,12 +72,6 @@ mod imp {
                 window.upcast()
             });
             window.present();
-
-            // Emit AppStarted once — SyncEngine reacts
-            if !self.activated.get() {
-                self.activated.set(true);
-                engine.sender().send(AppEvent::AppStarted);
-            }
         }
 
         fn shutdown(&self) {
