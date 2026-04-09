@@ -93,11 +93,24 @@ impl BodyWorker {
     }
 
     async fn fetch_body(&self, req: &FetchBodyRequest) -> anyhow::Result<()> {
+        let t0 = std::time::Instant::now();
+
         // Check if .eml already exists on disk
         if self.body_store.has_eml(&req.account_id, &req.uuid).await {
-            debug!(uid = req.uid, uuid = %req.uuid, "Body already on disk");
+            let t_disk = t0.elapsed();
             if let Some(raw) = self.body_store.read_eml(&req.account_id, &req.uuid).await? {
+                let t_read = t0.elapsed();
                 let body = parse_mime_body(&raw);
+                let t_parse = t0.elapsed();
+                debug!(
+                    uid = req.uid,
+                    bytes = raw.len(),
+                    disk_check_ms = t_disk.as_millis() as u64,
+                    read_ms = (t_read - t_disk).as_millis() as u64,
+                    parse_ms = (t_parse - t_read).as_millis() as u64,
+                    total_ms = t_parse.as_millis() as u64,
+                    "Body served from disk"
+                );
                 self.sender.send(AppEvent::MessageBodyFetched {
                     account_id: req.account_id.clone(),
                     folder_name: req.folder_name.clone(),
@@ -137,10 +150,13 @@ impl BodyWorker {
             folder = %req.folder_name,
             "Fetching body from IMAP"
         );
+        let t_imap_start = t0.elapsed();
         let mut guard = self.pool.acquire(&req.account_id, &config, max_conns).await?;
+        let t_pool = t0.elapsed();
         let session = guard.session();
 
         session.select(&req.folder_name).await?;
+        let t_select = t0.elapsed();
 
         let uid_str = req.uid.to_string();
         let fetches = match session.uid_fetch(&uid_str, "BODY[]").await {
@@ -150,6 +166,7 @@ impl BodyWorker {
                 return Err(e.into());
             }
         };
+        let t_fetch = t0.elapsed();
 
         let raw_bytes = fetches
             .iter()
@@ -161,16 +178,21 @@ impl BodyWorker {
             .store_eml(&req.account_id, &req.uuid, &raw_bytes)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to store .eml: {e}"))?;
+        let t_store = t0.elapsed();
 
         // Parse and emit
         let body = parse_mime_body(&raw_bytes);
+        let t_parse = t0.elapsed();
 
         debug!(
             uid = req.uid,
-            uuid = %req.uuid,
             bytes = raw_bytes.len(),
-            has_html = body.body_html.is_some(),
-            has_text = body.body_text.is_some(),
+            pool_ms = (t_pool - t_imap_start).as_millis() as u64,
+            select_ms = (t_select - t_pool).as_millis() as u64,
+            fetch_ms = (t_fetch - t_select).as_millis() as u64,
+            store_ms = (t_store - t_fetch).as_millis() as u64,
+            parse_ms = (t_parse - t_store).as_millis() as u64,
+            total_ms = t_parse.as_millis() as u64,
             "Body fetched and stored"
         );
 
