@@ -157,6 +157,14 @@ impl SyncEngine {
                     });
                 }
                 AppEvent::IdleFlagsChanged { account_id, folder_name, uid, is_read, is_flagged, is_answered, is_draft } => {
+                    debug!(
+                        uid,
+                        is_read,
+                        is_flagged,
+                        account_id = %account_id,
+                        folder_name = %folder_name,
+                        "Received IdleFlagsChanged event"
+                    );
                     let engine = Arc::clone(&engine);
                     let account_id = account_id.clone();
                     let folder_name = folder_name.clone();
@@ -166,11 +174,16 @@ impl SyncEngine {
                     let is_answered = *is_answered;
                     let is_draft = *is_draft;
                     tokio::spawn(async move {
-                        if let Err(e) = engine.messages.update_flags(
+                        match engine.messages.update_flags(
                             &account_id, &folder_name, uid,
                             is_read, is_flagged, is_answered, is_draft,
                         ).await {
-                            error!(uid, error = %e, "Failed to update flags from IDLE");
+                            Ok(changed) => {
+                                debug!(uid, changed, "Flag update result");
+                            }
+                            Err(e) => {
+                                error!(uid, error = %e, "Failed to update flags from IDLE");
+                            }
                         }
                     });
                 }
