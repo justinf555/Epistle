@@ -437,6 +437,61 @@ where
     Ok(all_messages)
 }
 
+/// Convert an `async_imap::types::Fetch` response into a [`RawEmail`].
+///
+/// Reusable across both one-shot connections and pool-based operations.
+pub fn fetch_to_raw_email(fetch: &async_imap::types::Fetch) -> Option<RawEmail> {
+    let uid = fetch.uid?;
+
+    let flags: Vec<String> = fetch
+        .flags()
+        .map(|f| match f {
+            Flag::Seen => "\\Seen".to_string(),
+            Flag::Answered => "\\Answered".to_string(),
+            Flag::Flagged => "\\Flagged".to_string(),
+            Flag::Deleted => "\\Deleted".to_string(),
+            Flag::Draft => "\\Draft".to_string(),
+            Flag::Recent => "\\Recent".to_string(),
+            Flag::MayCreate => "\\MayCreate".to_string(),
+            Flag::Custom(s) => s.to_string(),
+        })
+        .collect();
+
+    let mut raw = RawEmail {
+        uid,
+        flags,
+        subject: None,
+        from: None,
+        to: None,
+        cc: None,
+        date: None,
+        message_id: None,
+        in_reply_to: None,
+        internal_date: fetch.internal_date().map(|dt| dt.to_rfc3339()),
+        has_attachments: None,
+        body_text: None,
+    };
+
+    if let Some(envelope) = fetch.envelope() {
+        raw.subject = envelope.subject.as_ref().map(|s| s.to_vec());
+        raw.date = envelope.date.as_ref().map(|d| d.to_vec());
+        raw.message_id = envelope.message_id.as_ref().map(|m| m.to_vec());
+        raw.in_reply_to = envelope.in_reply_to.as_ref().map(|r| r.to_vec());
+
+        raw.from = envelope.from.as_ref().map(|addrs| {
+            addrs.iter().map(imap_addr_to_raw).collect()
+        });
+        raw.to = envelope.to.as_ref().map(|addrs| {
+            addrs.iter().map(imap_addr_to_raw).collect()
+        });
+        raw.cc = envelope.cc.as_ref().map(|addrs| {
+            addrs.iter().map(imap_addr_to_raw).collect()
+        });
+    }
+
+    Some(raw)
+}
+
 fn imap_addr_to_raw(addr: &async_imap::imap_proto::types::Address<'_>) -> RawAddress {
     RawAddress {
         name: addr.name.as_ref().map(|n: &std::borrow::Cow<'_, [u8]>| n.to_vec()),

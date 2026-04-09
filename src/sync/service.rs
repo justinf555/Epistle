@@ -235,143 +235,206 @@ impl SyncEngine {
 
         futures::future::join_all(futures).await;
 
-        // ── Fetch messages from all folders ───────────────────────────────
-        // Parallel across accounts, sequential across folders within each
-        // account to avoid IMAP throttling during initial sync.
+        // ── Sync messages for all folders ────────────────────────────────
+        // Two-stage pipeline per folder:
+        //   Stage 1 (ID sync): uid_search → diff → delete removed
+        //   Stage 2 (Header fetch): uid_fetch envelopes for new UIDs, newest first
         //
-        // Re-acquire IMAP credentials for message fetch (tokens may have refreshed)
-        let mut msg_tasks = Vec::new();
-        {
-            let goa = self.goa.lock().await;
-            for (account, goa_account) in domain_accounts.iter().zip(goa_accounts.iter()) {
-                debug!(email = %account.email_address, "Fetching IMAP credentials for message sync");
-                match goa.get_imap_auth(&account.goa_id).await {
-                    Ok(auth) => {
-                        msg_tasks.push((account.clone(), goa_account.imap_config.clone(), auth));
-                    }
-                    Err(e) => {
-                        warn!(
-                            email = %account.email_address,
-                            error = %e,
-                            "Failed to get IMAP credentials for message sync"
-                        );
-                    }
+        // Sequential per folder within each account to avoid IMAP throttling.
+        for account in &domain_accounts {
+            let mut account_folders = match self.folders.list_folders(&account.goa_id).await {
+                Ok(f) => f,
+                Err(e) => {
+                    error!(
+                        email = %account.email_address,
+                        error = %e,
+                        "Failed to list folders for message sync"
+                    );
+                    continue;
+                }
+            };
+            account_folders.sort_by_key(|f| folder_priority(f.role.as_deref()));
+
+            info!(
+                email = %account.email_address,
+                folder_count = account_folders.len(),
+                "Syncing messages across all folders"
+            );
+
+            let config = {
+                let configs = self.imap_configs.read().await;
+                configs.get(&account.goa_id).cloned()
+            };
+            let config = match config {
+                Some(c) => c,
+                None => {
+                    error!(email = %account.email_address, "No cached IMAP config");
+                    continue;
+                }
+            };
+
+            let max_conns = {
+                let providers = self.provider_types.read().await;
+                providers
+                    .get(&account.goa_id)
+                    .map(|p| max_connections_for_provider(p))
+                    .unwrap_or(10)
+            };
+
+            for folder in &account_folders {
+                if let Err(e) = self
+                    .sync_folder(&account.goa_id, &folder.name, &config, max_conns)
+                    .await
+                {
+                    error!(
+                        email = %account.email_address,
+                        folder = %folder.name,
+                        error = %e,
+                        "Folder sync failed"
+                    );
                 }
             }
         }
 
-        debug!(count = msg_tasks.len(), "Starting multi-folder message fetch");
-        let msg_futures: Vec<_> = msg_tasks
-            .into_iter()
-            .map(|(account, config, auth)| {
-                let messages_impl = Arc::clone(&self.messages);
-                let folders_impl = Arc::clone(&self.folders);
-                let pipeline = &self.pipeline;
-                async move {
-                    // Get synced folders for this account, sorted by priority
-                    let mut account_folders = match folders_impl.list_folders(&account.goa_id).await {
-                        Ok(f) => f,
-                        Err(e) => {
-                            error!(
-                                email = %account.email_address,
-                                error = %e,
-                                "Failed to list folders for message sync"
-                            );
-                            return;
-                        }
-                    };
-                    account_folders.sort_by_key(|f| folder_priority(f.role.as_deref()));
-
-                    info!(
-                        email = %account.email_address,
-                        folder_count = account_folders.len(),
-                        "Syncing messages across all folders"
-                    );
-
-                    // Sequential per folder within this account
-                    for folder in &account_folders {
-                        debug!(
-                            email = %account.email_address,
-                            folder = %folder.name,
-                            role = ?folder.role,
-                            batch_size = FETCH_BATCH_SIZE,
-                            "Fetching messages for folder"
-                        );
-                        match crate::sync::imap::fetch_messages(
-                            &config,
-                            &auth,
-                            &folder.name,
-                            FETCH_BATCH_SIZE,
-                        )
-                        .await
-                        {
-                            Ok(raw_emails) => {
-                                let messages: Vec<Message> = raw_emails
-                                    .iter()
-                                    .map(|raw| {
-                                        let mut msg = Message {
-                                            uuid: uuid::Uuid::new_v4().to_string(),
-                                            uid: raw.uid,
-                                            account_id: account.goa_id.clone(),
-                                            folder_name: folder.name.clone(),
-                                            message_id: None,
-                                            subject: None,
-                                            sender: None,
-                                            to_addresses: vec![],
-                                            cc_addresses: vec![],
-                                            date: None,
-                                            in_reply_to: None,
-                                            references: vec![],
-                                            is_read: false,
-                                            is_flagged: false,
-                                            is_answered: false,
-                                            is_draft: false,
-                                            preview: None,
-                                            content_type: None,
-                                            has_attachments: false,
-                                            internal_date: None,
-                                        };
-                                        pipeline.process(&mut msg, raw);
-                                        msg
-                                    })
-                                    .collect();
-
-                                info!(
-                                    email = %account.email_address,
-                                    count = messages.len(),
-                                    folder = %folder.name,
-                                    "Synced messages"
-                                );
-
-                                if let Err(e) = messages_impl
-                                    .sync_messages(&account.goa_id, &folder.name, &messages)
-                                    .await
-                                {
-                                    error!(
-                                        email = %account.email_address,
-                                        folder = %folder.name,
-                                        error = %e,
-                                        "Failed to persist messages"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    email = %account.email_address,
-                                    folder = %folder.name,
-                                    error = %e,
-                                    "IMAP message fetch failed"
-                                );
-                            }
-                        }
-                    }
-                }
-            })
-            .collect();
-
-        futures::future::join_all(msg_futures).await;
-
         info!("Initial sync complete");
+        Ok(())
+    }
+
+    /// Two-stage folder sync: ID sync (diff UIDs) then header fetch (envelopes).
+    async fn sync_folder(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        config: &ImapConfig,
+        max_conns: usize,
+    ) -> anyhow::Result<()> {
+        // ── Stage 1: ID Sync ────────────────────────────────────────────
+        // Get all UIDs from server, diff against local, delete removed.
+        let new_uids = {
+            let mut guard = self.pool.acquire(account_id, config, max_conns).await?;
+            let session = guard.session();
+            session.select(folder_name).await?;
+
+            let server_uids = match session.uid_search("ALL").await {
+                Ok(uids) => uids,
+                Err(e) => {
+                    guard.poison();
+                    return Err(e.into());
+                }
+            };
+
+            let local_uids = self.messages.list_local_uids(account_id, folder_name).await?;
+
+            // Delete messages that no longer exist on server
+            let deleted_uids: Vec<u32> = local_uids.difference(&server_uids).copied().collect();
+            if !deleted_uids.is_empty() {
+                let count = self
+                    .messages
+                    .delete_messages_by_uids(account_id, folder_name, &deleted_uids)
+                    .await?;
+                info!(account_id, folder_name, count, "Removed deleted messages");
+            }
+
+            // New UIDs to fetch, sorted descending (newest first)
+            let mut new: Vec<u32> = server_uids.difference(&local_uids).copied().collect();
+            new.sort_unstable_by(|a, b| b.cmp(a));
+
+            debug!(
+                account_id,
+                folder_name,
+                server = server_uids.len(),
+                local = local_uids.len(),
+                new = new.len(),
+                deleted = deleted_uids.len(),
+                "ID sync complete"
+            );
+
+            new
+            // guard dropped — connection returned to pool
+        };
+
+        if new_uids.is_empty() {
+            return Ok(());
+        }
+
+        // ── Stage 2: Header Fetch ───────────────────────────────────────
+        // Fetch envelopes in batches of FETCH_BATCH_SIZE, newest first.
+        for batch in new_uids.chunks(FETCH_BATCH_SIZE as usize) {
+            let uid_set = batch
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+
+            let mut guard = self.pool.acquire(account_id, config, max_conns).await?;
+            let session = guard.session();
+            session.select(folder_name).await?;
+
+            let fetches = match session
+                .uid_fetch(&uid_set, "(UID ENVELOPE FLAGS INTERNALDATE)")
+                .await
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    guard.poison();
+                    return Err(e.into());
+                }
+            };
+
+            let messages: Vec<Message> = fetches
+                .iter()
+                .filter_map(|fetch| {
+                    let raw = crate::sync::imap::fetch_to_raw_email(fetch)?;
+                    let mut msg = Message {
+                        uuid: uuid::Uuid::new_v4().to_string(),
+                        uid: raw.uid,
+                        account_id: account_id.to_string(),
+                        folder_name: folder_name.to_string(),
+                        message_id: None,
+                        subject: None,
+                        sender: None,
+                        to_addresses: vec![],
+                        cc_addresses: vec![],
+                        date: None,
+                        in_reply_to: None,
+                        references: vec![],
+                        is_read: false,
+                        is_flagged: false,
+                        is_answered: false,
+                        is_draft: false,
+                        preview: None,
+                        content_type: None,
+                        has_attachments: false,
+                        internal_date: None,
+                    };
+                    self.pipeline.process(&mut msg, &raw);
+                    Some(msg)
+                })
+                .collect();
+
+            info!(
+                account_id,
+                folder_name,
+                count = messages.len(),
+                "Fetched message headers"
+            );
+
+            if let Err(e) = self
+                .messages
+                .sync_messages(account_id, folder_name, &messages)
+                .await
+            {
+                error!(
+                    account_id,
+                    folder_name,
+                    error = %e,
+                    "Failed to persist messages"
+                );
+            }
+
+            // guard dropped — connection returned to pool
+        }
+
         Ok(())
     }
 
