@@ -20,6 +20,7 @@ CREATE TABLE messages (
     preview         TEXT,
     content_type    TEXT,
     has_attachments INTEGER NOT NULL DEFAULT 0,
+    has_body        INTEGER NOT NULL DEFAULT 0,
     content_hash    TEXT,
     UNIQUE(account_id, folder_name, uid),
     UNIQUE(uuid)

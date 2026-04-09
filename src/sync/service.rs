@@ -9,7 +9,6 @@ use gtk::prelude::*;
 use tokio::sync::mpsc;
 
 use crate::app_event::AppEvent;
-use crate::engine::body_store::BodyStore;
 use crate::engine::pipeline::EmailPipeline;
 use crate::engine::traits::accounts::{Account, MailAccounts};
 use crate::engine::traits::folders::{Folder, MailFolders};
@@ -40,7 +39,6 @@ pub struct SyncEngine {
     accounts: Arc<dyn MailAccounts>,
     folders: Arc<dyn MailFolders>,
     messages: Arc<dyn MailMessages>,
-    body_store: Arc<BodyStore>,
     #[allow(dead_code)] // Used for IDLE notifications and sync progress events
     sender: EventSender,
     pipeline: EmailPipeline,
@@ -73,7 +71,6 @@ impl SyncEngine {
         let body_store = engine.body_store();
         let sender = engine.sender();
         let prefetch_days = settings.int("sync-body-prefetch-days").max(0) as u32;
-        let body_store_for_engine = Arc::clone(&body_store);
         let poll_interval_minutes = settings.int("sync-poll-interval-minutes").max(1) as u32;
 
         let goa = Arc::new(tokio::sync::Mutex::new(GoaClient::new().await?));
@@ -103,7 +100,6 @@ impl SyncEngine {
             accounts,
             folders,
             messages,
-            body_store: body_store_for_engine,
             sender,
             pipeline: EmailPipeline::new(),
             running: std::sync::atomic::AtomicBool::new(false),
@@ -188,6 +184,17 @@ impl SyncEngine {
                             Err(e) => {
                                 error!(uid, error = %e, "Failed to update flags from IDLE");
                             }
+                        }
+                    });
+                }
+                AppEvent::MessageBodyFetched { account_id, folder_name, uid, .. } => {
+                    let engine = Arc::clone(&engine);
+                    let account_id = account_id.clone();
+                    let folder_name = folder_name.clone();
+                    let uid = *uid;
+                    tokio::spawn(async move {
+                        if let Err(e) = engine.messages.mark_body_downloaded(&account_id, &folder_name, uid).await {
+                            error!(uid, error = %e, "Failed to mark body as downloaded");
                         }
                     });
                 }
@@ -420,12 +427,11 @@ impl SyncEngine {
     }
 
     /// Queue body fetches for messages within the prefetch window that are
-    /// missing .eml files (e.g., app was quit before prefetch completed).
+    /// missing bodies (has_body = false in DB).
     async fn backfill_missing_bodies(&self, accounts: &[Account]) {
         let cutoff = chrono::Utc::now() - chrono::Duration::days(self.prefetch_days as i64);
         let cutoff_str = cutoff.to_rfc3339();
         let mut queued = 0u32;
-        let mut skipped = 0u32;
 
         for account in accounts {
             let folders = match self.folders.list_folders(&account.goa_id).await {
@@ -434,22 +440,16 @@ impl SyncEngine {
             };
 
             for folder in &folders {
-                let messages = match self
+                let missing = match self
                     .messages
-                    .list_messages_since(&account.goa_id, &folder.name, &cutoff_str)
+                    .list_missing_bodies(&account.goa_id, &folder.name, &cutoff_str)
                     .await
                 {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
 
-                for (uuid, uid, _date) in messages {
-                    // Only queue if .eml is missing on disk
-                    if self.body_store.has_eml(&account.goa_id, &uuid).await {
-                        skipped += 1;
-                        continue;
-                    }
-
+                for (uuid, uid) in missing {
                     let _ = self.body_background_tx.try_send(FetchBodyRequest {
                         uid,
                         uuid,
@@ -461,8 +461,8 @@ impl SyncEngine {
             }
         }
 
-        if queued > 0 || skipped > 0 {
-            info!(queued, skipped, prefetch_days = self.prefetch_days, "Body backfill complete");
+        if queued > 0 {
+            info!(queued, prefetch_days = self.prefetch_days, "Queued body backfill");
         }
     }
 

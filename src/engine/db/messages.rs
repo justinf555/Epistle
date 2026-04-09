@@ -24,6 +24,7 @@ pub struct MessageRow {
     pub preview: Option<String>,
     pub content_type: Option<String>,
     pub has_attachments: bool,
+    pub has_body: bool,
     pub internal_date: Option<String>,
 }
 
@@ -67,7 +68,7 @@ const MESSAGE_COLUMNS: &str =
     "id, uuid, account_id, folder_name, uid, message_id, subject, sender,
      to_addresses, cc_addresses, date, in_reply_to, reference_ids,
      is_read, is_flagged, is_answered, is_draft,
-     preview, content_type, has_attachments, internal_date";
+     preview, content_type, has_attachments, has_body, internal_date";
 
 impl Database {
     /// Bulk upsert messages for a folder within a transaction. Skips rows where
@@ -322,6 +323,45 @@ impl Database {
         .execute(self.pool())
         .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Mark a message as having its body downloaded.
+    pub async fn mark_body_downloaded(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            "UPDATE messages SET has_body = 1
+             WHERE account_id = ? AND folder_name = ? AND uid = ?",
+        )
+        .bind(account_id)
+        .bind(folder_name)
+        .bind(uid)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    /// Get uuid, uid for messages within the prefetch window that are missing bodies.
+    pub async fn list_missing_bodies(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        since: &str,
+    ) -> Result<Vec<(String, i64)>, DbError> {
+        let rows = sqlx::query_as::<_, (String, i64)>(
+            "SELECT uuid, uid FROM messages
+             WHERE account_id = ? AND folder_name = ? AND has_body = 0
+             AND (internal_date >= ? OR internal_date IS NULL)",
+        )
+        .bind(account_id)
+        .bind(folder_name)
+        .bind(since)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
     }
 
     /// Delete messages by UID. Returns the number of rows deleted.

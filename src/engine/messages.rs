@@ -177,6 +177,25 @@ impl MailMessages for MailMessagesImpl {
             .collect())
     }
 
+    async fn mark_body_downloaded(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+    ) -> anyhow::Result<()> {
+        Ok(self.db.mark_body_downloaded(account_id, folder_name, uid).await?)
+    }
+
+    async fn list_missing_bodies(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        since: &str,
+    ) -> anyhow::Result<Vec<(String, u32)>> {
+        let rows = self.db.list_missing_bodies(account_id, folder_name, since).await?;
+        Ok(rows.into_iter().map(|(uuid, uid)| (uuid, uid as u32)).collect())
+    }
+
     async fn get_uuid(
         &self,
         account_id: &str,
