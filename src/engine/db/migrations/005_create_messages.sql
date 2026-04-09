@@ -1,5 +1,6 @@
 CREATE TABLE messages (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    uuid            TEXT NOT NULL,
     account_id      TEXT NOT NULL REFERENCES accounts(goa_id),
     folder_name     TEXT NOT NULL,
     uid             INTEGER NOT NULL,
@@ -9,6 +10,7 @@ CREATE TABLE messages (
     to_addresses    TEXT,
     cc_addresses    TEXT,
     date            TEXT,
+    internal_date   TEXT,
     in_reply_to     TEXT,
     reference_ids   TEXT,
     is_read         INTEGER NOT NULL DEFAULT 0,
@@ -19,5 +21,6 @@ CREATE TABLE messages (
     content_type    TEXT,
     has_attachments INTEGER NOT NULL DEFAULT 0,
     content_hash    TEXT,
-    UNIQUE(account_id, folder_name, uid)
+    UNIQUE(account_id, folder_name, uid),
+    UNIQUE(uuid)
 );

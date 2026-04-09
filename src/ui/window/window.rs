@@ -90,7 +90,7 @@ impl EpistleWindow {
     ) {
         // Clone for message list and message view before sidebar takes ownership
         let accounts_for_messages = Arc::clone(&accounts);
-        let messages_for_view = Arc::clone(&messages);
+
 
         // Sidebar — inject and parent into outer split
         let sidebar = EpistleSidebar::new();
@@ -109,7 +109,7 @@ impl EpistleWindow {
 
         // Message view — inject and parent into inner split content
         let message_view = EpistleMessageView::new();
-        message_view.set_engine(messages_for_view, sender);
+        message_view.set_engine(sender);
 
         self.imp().inner_split.set_content(Some(&message_view));
 

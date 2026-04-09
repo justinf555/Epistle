@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist gettext-domain="epistle">
 	<schema id="io.github.justinf555.Epistle" path="/io/github/justinf555/Epistle/">
+		<key name="sync-body-prefetch-days" type="i">
+			<default>14</default>
+			<summary>Body prefetch window (days)</summary>
+			<description>Number of days of message bodies to prefetch in the background. Messages older than this are fetched on demand when viewed. Set to 0 to disable background prefetch.</description>
+		</key>
+		<key name="sync-poll-interval-minutes" type="i">
+			<default>5</default>
+			<summary>Poll interval (minutes)</summary>
+			<description>How often to poll for new messages when IMAP IDLE is not available. Ignored when the server supports IDLE.</description>
+		</key>
 	</schema>
 </schemalist>

@@ -2,6 +2,10 @@ run:
 	flatpak-builder --user --install --force-clean flatpak-build-dir io.github.justinf555.Epistle.json && \
 	flatpak run io.github.justinf555.Epistle
 
+debug:
+	flatpak-builder --user --install --force-clean flatpak-build-dir io.github.justinf555.Epistle.json && \
+	flatpak run --env=RUST_LOG=epistle=debug io.github.justinf555.Epistle
+
 clean:
 	rm -rf flatpak-build-dir
 

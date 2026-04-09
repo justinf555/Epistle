@@ -252,189 +252,61 @@ fn detect_role(name: &str, attrs: &[NameAttribute<'_>]) -> Option<String> {
     None
 }
 
-// ── Message Fetching ────────────────────────────────────────────────────────
+// ── Fetch Response Parsing ──────────────────────────────────────────────────
 
-/// Connect to an IMAP server, SELECT the given folder, FETCH message
-/// envelopes + flags + body structure in batches, and disconnect.
+/// Convert an `async_imap::types::Fetch` response into a [`RawEmail`].
 ///
-/// Returns a Vec of [`RawEmail`] ready for the processing pipeline.
-/// Fetches in batches of `batch_size` UIDs, newest first.
-pub async fn fetch_messages(
-    config: &ImapConfig,
-    auth: &AuthMethod,
-    folder: &str,
-    batch_size: u32,
-) -> Result<Vec<RawEmail>, ImapError> {
-    match config.tls_mode {
-        TlsMode::Implicit => fetch_messages_implicit(config, auth, folder, batch_size).await,
-        TlsMode::StartTls => fetch_messages_starttls(config, auth, folder, batch_size).await,
-        TlsMode::None => {
-            tracing::warn!(host = %config.host, "Connecting to IMAP without TLS — credentials will be sent in plaintext");
-            fetch_messages_plain(config, auth, folder, batch_size).await
-        }
-    }
-}
+/// Reusable across both one-shot connections and pool-based operations.
+pub fn fetch_to_raw_email(fetch: &async_imap::types::Fetch) -> Option<RawEmail> {
+    let uid = fetch.uid?;
 
-async fn fetch_messages_implicit(
-    config: &ImapConfig,
-    auth: &AuthMethod,
-    folder: &str,
-    batch_size: u32,
-) -> Result<Vec<RawEmail>, ImapError> {
-    let tcp = TcpStream::connect((&*config.host, config.port)).await?;
-    let tls = tls_connector(config)?;
-    let tls_stream = tls.connect(&config.host, tcp).await.map_err(|e| {
-        ImapError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))
-    })?;
+    let flags: Vec<String> = fetch
+        .flags()
+        .map(|f| match f {
+            Flag::Seen => "\\Seen".to_string(),
+            Flag::Answered => "\\Answered".to_string(),
+            Flag::Flagged => "\\Flagged".to_string(),
+            Flag::Deleted => "\\Deleted".to_string(),
+            Flag::Draft => "\\Draft".to_string(),
+            Flag::Recent => "\\Recent".to_string(),
+            Flag::MayCreate => "\\MayCreate".to_string(),
+            Flag::Custom(s) => s.to_string(),
+        })
+        .collect();
 
-    let mut client = async_imap::Client::new(tls_stream);
-    client.read_response().await.transpose()?;
+    let mut raw = RawEmail {
+        uid,
+        flags,
+        subject: None,
+        from: None,
+        to: None,
+        cc: None,
+        date: None,
+        message_id: None,
+        in_reply_to: None,
+        internal_date: fetch.internal_date().map(|dt| dt.to_rfc3339()),
+        has_attachments: None,
+        body_text: None,
+    };
 
-    let mut session = authenticate(client, auth).await?;
-    let messages = fetch_from_session(&mut session, folder, batch_size).await?;
-    session.logout().await?;
-    Ok(messages)
-}
+    if let Some(envelope) = fetch.envelope() {
+        raw.subject = envelope.subject.as_ref().map(|s| s.to_vec());
+        raw.date = envelope.date.as_ref().map(|d| d.to_vec());
+        raw.message_id = envelope.message_id.as_ref().map(|m| m.to_vec());
+        raw.in_reply_to = envelope.in_reply_to.as_ref().map(|r| r.to_vec());
 
-async fn fetch_messages_starttls(
-    config: &ImapConfig,
-    auth: &AuthMethod,
-    folder: &str,
-    batch_size: u32,
-) -> Result<Vec<RawEmail>, ImapError> {
-    let tcp = TcpStream::connect((&*config.host, config.port)).await?;
-    let mut client = async_imap::Client::new(tcp);
-    client.read_response().await.transpose()?;
-    client
-        .run_command_and_check_ok("STARTTLS", None)
-        .await
-        .map_err(async_imap::error::Error::from)?;
-
-    let inner = client.into_inner();
-    let tls = tls_connector(config)?;
-    let tls_stream = tls.connect(&config.host, inner).await.map_err(|e| {
-        ImapError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))
-    })?;
-
-    let client = async_imap::Client::new(tls_stream);
-    let mut session = authenticate(client, auth).await?;
-    let messages = fetch_from_session(&mut session, folder, batch_size).await?;
-    session.logout().await?;
-    Ok(messages)
-}
-
-async fn fetch_messages_plain(
-    config: &ImapConfig,
-    auth: &AuthMethod,
-    folder: &str,
-    batch_size: u32,
-) -> Result<Vec<RawEmail>, ImapError> {
-    let tcp = TcpStream::connect((&*config.host, config.port)).await?;
-    let mut client = async_imap::Client::new(tcp);
-    client.read_response().await.transpose()?;
-
-    let mut session = authenticate(client, auth).await?;
-    let messages = fetch_from_session(&mut session, folder, batch_size).await?;
-    session.logout().await?;
-    Ok(messages)
-}
-
-/// SELECT folder, then FETCH envelopes in batches of UIDs (newest first).
-async fn fetch_from_session<T>(
-    session: &mut async_imap::Session<T>,
-    folder: &str,
-    batch_size: u32,
-) -> Result<Vec<RawEmail>, ImapError>
-where
-    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
-{
-    let mailbox = session.select(folder).await?;
-    let exists = mailbox.exists;
-
-    if exists == 0 {
-        return Ok(vec![]);
+        raw.from = envelope.from.as_ref().map(|addrs| {
+            addrs.iter().map(imap_addr_to_raw).collect()
+        });
+        raw.to = envelope.to.as_ref().map(|addrs| {
+            addrs.iter().map(imap_addr_to_raw).collect()
+        });
+        raw.cc = envelope.cc.as_ref().map(|addrs| {
+            addrs.iter().map(imap_addr_to_raw).collect()
+        });
     }
 
-    let mut all_messages = Vec::new();
-
-    // Fetch in batches, newest first (highest sequence numbers first)
-    let mut end = exists;
-    while end > 0 {
-        let start = if end > batch_size { end - batch_size + 1 } else { 1 };
-        let range = format!("{}:{}", start, end);
-
-        // BODYSTRUCTURE omitted — imap-proto's parser fails on complex nested
-        // MIME structures (e.g. multipart/related with inline images and
-        // MIME-encoded filenames). Attachment detection deferred to Phase 2
-        // when we parse the body ourselves with mail-parser.
-        let fetches: Vec<_> = session
-            .fetch(&range, "(UID ENVELOPE FLAGS INTERNALDATE)")
-            .await?
-            .try_collect()
-            .await?;
-
-        for fetch in &fetches {
-            let uid = match fetch.uid {
-                Some(uid) => uid,
-                None => continue,
-            };
-
-            let flags: Vec<String> = fetch
-                .flags()
-                .map(|f| match f {
-                    Flag::Seen => "\\Seen".to_string(),
-                    Flag::Answered => "\\Answered".to_string(),
-                    Flag::Flagged => "\\Flagged".to_string(),
-                    Flag::Deleted => "\\Deleted".to_string(),
-                    Flag::Draft => "\\Draft".to_string(),
-                    Flag::Recent => "\\Recent".to_string(),
-                    Flag::MayCreate => "\\MayCreate".to_string(),
-                    Flag::Custom(s) => s.to_string(),
-                })
-                .collect();
-
-            let mut raw = RawEmail {
-                uid,
-                flags,
-                subject: None,
-                from: None,
-                to: None,
-                cc: None,
-                date: None,
-                message_id: None,
-                in_reply_to: None,
-                internal_date: fetch.internal_date().map(|dt| dt.to_rfc3339()),
-                has_attachments: None,
-                body_text: None,
-            };
-
-            if let Some(envelope) = fetch.envelope() {
-                raw.subject = envelope.subject.as_ref().map(|s| s.to_vec());
-                raw.date = envelope.date.as_ref().map(|d| d.to_vec());
-                raw.message_id = envelope.message_id.as_ref().map(|m| m.to_vec());
-                raw.in_reply_to = envelope.in_reply_to.as_ref().map(|r| r.to_vec());
-
-                raw.from = envelope.from.as_ref().map(|addrs| {
-                    addrs.iter().map(imap_addr_to_raw).collect()
-                });
-                raw.to = envelope.to.as_ref().map(|addrs| {
-                    addrs.iter().map(imap_addr_to_raw).collect()
-                });
-                raw.cc = envelope.cc.as_ref().map(|addrs| {
-                    addrs.iter().map(imap_addr_to_raw).collect()
-                });
-            }
-
-            all_messages.push(raw);
-        }
-
-        if start == 1 {
-            break;
-        }
-        end = start - 1;
-    }
-
-    Ok(all_messages)
+    Some(raw)
 }
 
 fn imap_addr_to_raw(addr: &async_imap::imap_proto::types::Address<'_>) -> RawAddress {
@@ -443,118 +315,6 @@ fn imap_addr_to_raw(addr: &async_imap::imap_proto::types::Address<'_>) -> RawAdd
         mailbox: addr.mailbox.as_ref().map(|m: &std::borrow::Cow<'_, [u8]>| m.to_vec()),
         host: addr.host.as_ref().map(|h: &std::borrow::Cow<'_, [u8]>| h.to_vec()),
     }
-}
-
-// ── Single-Message Body Fetch ────────────────────────────────────────────────
-
-/// Connect to IMAP, SELECT the folder, UID FETCH the full message body,
-/// and return the raw RFC 5322 bytes. Single-shot connection.
-pub async fn fetch_message_body(
-    config: &ImapConfig,
-    auth: &AuthMethod,
-    folder: &str,
-    uid: u32,
-) -> Result<Vec<u8>, ImapError> {
-    match config.tls_mode {
-        TlsMode::Implicit => fetch_body_implicit(config, auth, folder, uid).await,
-        TlsMode::StartTls => fetch_body_starttls(config, auth, folder, uid).await,
-        TlsMode::None => {
-            tracing::warn!(host = %config.host, "Connecting to IMAP without TLS — credentials will be sent in plaintext");
-            fetch_body_plain(config, auth, folder, uid).await
-        }
-    }
-}
-
-async fn fetch_body_implicit(
-    config: &ImapConfig,
-    auth: &AuthMethod,
-    folder: &str,
-    uid: u32,
-) -> Result<Vec<u8>, ImapError> {
-    let tcp = TcpStream::connect((&*config.host, config.port)).await?;
-    let tls = tls_connector(config)?;
-    let tls_stream = tls.connect(&config.host, tcp).await.map_err(|e| {
-        ImapError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))
-    })?;
-
-    let mut client = async_imap::Client::new(tls_stream);
-    client.read_response().await.transpose()?;
-
-    let mut session = authenticate(client, auth).await?;
-    let body = fetch_body_from_session(&mut session, folder, uid).await?;
-    session.logout().await?;
-    Ok(body)
-}
-
-async fn fetch_body_starttls(
-    config: &ImapConfig,
-    auth: &AuthMethod,
-    folder: &str,
-    uid: u32,
-) -> Result<Vec<u8>, ImapError> {
-    let tcp = TcpStream::connect((&*config.host, config.port)).await?;
-    let mut client = async_imap::Client::new(tcp);
-    client.read_response().await.transpose()?;
-    client
-        .run_command_and_check_ok("STARTTLS", None)
-        .await
-        .map_err(async_imap::error::Error::from)?;
-
-    let inner = client.into_inner();
-    let tls = tls_connector(config)?;
-    let tls_stream = tls.connect(&config.host, inner).await.map_err(|e| {
-        ImapError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))
-    })?;
-
-    let client = async_imap::Client::new(tls_stream);
-    let mut session = authenticate(client, auth).await?;
-    let body = fetch_body_from_session(&mut session, folder, uid).await?;
-    session.logout().await?;
-    Ok(body)
-}
-
-async fn fetch_body_plain(
-    config: &ImapConfig,
-    auth: &AuthMethod,
-    folder: &str,
-    uid: u32,
-) -> Result<Vec<u8>, ImapError> {
-    let tcp = TcpStream::connect((&*config.host, config.port)).await?;
-    let mut client = async_imap::Client::new(tcp);
-    client.read_response().await.transpose()?;
-
-    let mut session = authenticate(client, auth).await?;
-    let body = fetch_body_from_session(&mut session, folder, uid).await?;
-    session.logout().await?;
-    Ok(body)
-}
-
-/// SELECT folder, UID FETCH the full message body for a single UID.
-async fn fetch_body_from_session<T>(
-    session: &mut async_imap::Session<T>,
-    folder: &str,
-    uid: u32,
-) -> Result<Vec<u8>, ImapError>
-where
-    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
-{
-    session.select(folder).await?;
-
-    let uid_str = uid.to_string();
-    let fetches: Vec<_> = session
-        .uid_fetch(&uid_str, "BODY[]")
-        .await?
-        .try_collect()
-        .await?;
-
-    for fetch in &fetches {
-        if let Some(body) = fetch.body() {
-            tracing::debug!(uid, bytes = body.len(), "Fetched message body");
-            return Ok(body.to_vec());
-        }
-    }
-
-    Err(ImapError::MessageNotFound { uid })
 }
 
 /// XOAUTH2 SASL authenticator for OAuth providers (Gmail, Microsoft).

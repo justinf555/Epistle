@@ -71,6 +71,7 @@ mod tests {
 
     fn empty_message() -> Message {
         Message {
+            uuid: "test-uuid".to_string(),
             uid: 0,
             account_id: String::new(),
             folder_name: String::new(),
@@ -90,8 +91,6 @@ mod tests {
             preview: None,
             content_type: None,
             has_attachments: false,
-            body_text: None,
-            body_html: None,
         }
     }
 

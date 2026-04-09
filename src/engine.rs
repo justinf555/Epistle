@@ -8,11 +8,13 @@ pub mod db;
 pub mod traits;
 
 pub mod accounts;
+pub mod body_store;
 pub mod folders;
 pub mod messages;
 pub mod pipeline;
 
 use accounts::MailAccountsImpl;
+use body_store::BodyStore;
 use db::Database;
 use folders::MailFoldersImpl;
 use messages::MailMessagesImpl;
@@ -31,6 +33,7 @@ pub struct MailEngine {
     accounts: Arc<dyn MailAccounts>,
     folders: Arc<dyn MailFolders>,
     messages: Arc<dyn MailMessages>,
+    body_store: Arc<BodyStore>,
 }
 
 impl std::fmt::Debug for MailEngine {
@@ -42,8 +45,15 @@ impl std::fmt::Debug for MailEngine {
 impl MailEngine {
     /// Open the database, run migrations, and create trait implementations.
     pub async fn open() -> anyhow::Result<Self> {
-        let db_path = glib::user_data_dir().join("epistle").join("mail.db");
+        let data_dir = glib::user_data_dir().join("epistle");
+        let db_path = data_dir.join("mail.db");
         let db = Database::open(&db_path).await?;
+
+        let body_store = Arc::new(
+            BodyStore::open(data_dir.join("messages"))
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to open body store: {e}"))?,
+        );
 
         let bus = EventBus::new();
         let sender = bus.sender();
@@ -58,6 +68,7 @@ impl MailEngine {
             accounts,
             folders,
             messages,
+            body_store,
         })
     }
 
@@ -84,5 +95,10 @@ impl MailEngine {
     /// Message storage trait object.
     pub fn messages(&self) -> Arc<dyn MailMessages> {
         Arc::clone(&self.messages)
+    }
+
+    /// Body store for raw .eml file access.
+    pub fn body_store(&self) -> Arc<BodyStore> {
+        Arc::clone(&self.body_store)
     }
 }

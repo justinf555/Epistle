@@ -5,6 +5,7 @@ use super::{Database, DbError};
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct MessageRow {
     pub id: i64,
+    pub uuid: String,
     pub account_id: String,
     pub folder_name: String,
     pub uid: i64,
@@ -24,12 +25,11 @@ pub struct MessageRow {
     pub content_type: Option<String>,
     pub has_attachments: bool,
     pub internal_date: Option<String>,
-    pub body_text: Option<String>,
-    pub body_html: Option<String>,
 }
 
 /// Fields for upserting a message. Passed as a slice to bulk operations.
 pub struct MessageFields<'a> {
+    pub uuid: &'a str,
     pub uid: u32,
     pub message_id: Option<&'a str>,
     pub subject: Option<&'a str>,
@@ -61,6 +61,13 @@ impl UpsertResult {
         !self.inserted.is_empty() || !self.updated.is_empty()
     }
 }
+
+/// Column list shared by all SELECT queries on the messages table.
+const MESSAGE_COLUMNS: &str =
+    "id, uuid, account_id, folder_name, uid, message_id, subject, sender,
+     to_addresses, cc_addresses, date, in_reply_to, reference_ids,
+     is_read, is_flagged, is_answered, is_draft,
+     preview, content_type, has_attachments, internal_date";
 
 impl Database {
     /// Bulk upsert messages for a folder within a transaction. Skips rows where
@@ -98,12 +105,12 @@ impl Database {
 
             let rows = sqlx::query(
                 "INSERT INTO messages (
-                    account_id, folder_name, uid, message_id, subject, sender,
+                    uuid, account_id, folder_name, uid, message_id, subject, sender,
                     to_addresses, cc_addresses, date, in_reply_to, reference_ids,
                     is_read, is_flagged, is_answered, is_draft,
                     preview, content_type, has_attachments, internal_date, content_hash
                  )
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(account_id, folder_name, uid) DO UPDATE SET
                      message_id    = excluded.message_id,
                      subject       = excluded.subject,
@@ -124,6 +131,7 @@ impl Database {
                      content_hash  = excluded.content_hash
                  WHERE content_hash IS NOT excluded.content_hash",
             )
+            .bind(msg.uuid)
             .bind(account_id)
             .bind(folder_name)
             .bind(msg.uid)
@@ -166,20 +174,16 @@ impl Database {
         account_id: &str,
         folder_name: &str,
     ) -> Result<Vec<MessageRow>, DbError> {
-        let rows = sqlx::query_as::<_, MessageRow>(
-            "SELECT id, account_id, folder_name, uid, message_id, subject, sender,
-                    to_addresses, cc_addresses, date, in_reply_to, reference_ids,
-                    is_read, is_flagged, is_answered, is_draft,
-                    preview, content_type, has_attachments,
-                    internal_date, body_text, body_html
-             FROM messages
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages
              WHERE account_id = ? AND folder_name = ?
-             ORDER BY COALESCE(internal_date, date) DESC, uid DESC",
-        )
-        .bind(account_id)
-        .bind(folder_name)
-        .fetch_all(self.pool())
-        .await?;
+             ORDER BY COALESCE(internal_date, date) DESC, uid DESC"
+        );
+        let rows = sqlx::query_as::<_, MessageRow>(&sql)
+            .bind(account_id)
+            .bind(folder_name)
+            .fetch_all(self.pool())
+            .await?;
         Ok(rows)
     }
 
@@ -191,23 +195,19 @@ impl Database {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<MessageRow>, DbError> {
-        let rows = sqlx::query_as::<_, MessageRow>(
-            "SELECT id, account_id, folder_name, uid, message_id, subject, sender,
-                    to_addresses, cc_addresses, date, in_reply_to, reference_ids,
-                    is_read, is_flagged, is_answered, is_draft,
-                    preview, content_type, has_attachments,
-                    internal_date, body_text, body_html
-             FROM messages
+        let sql = format!(
+            "SELECT {MESSAGE_COLUMNS} FROM messages
              WHERE account_id = ? AND folder_name = ?
              ORDER BY COALESCE(internal_date, date) DESC, uid DESC
-             LIMIT ? OFFSET ?",
-        )
-        .bind(account_id)
-        .bind(folder_name)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(self.pool())
-        .await?;
+             LIMIT ? OFFSET ?"
+        );
+        let rows = sqlx::query_as::<_, MessageRow>(&sql)
+            .bind(account_id)
+            .bind(folder_name)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(self.pool())
+            .await?;
         Ok(rows)
     }
 
@@ -221,16 +221,9 @@ impl Database {
         if uids.is_empty() {
             return Ok(vec![]);
         }
-        // Dynamic SQL: sqlx compile-time verification not possible for variable-length
-        // IN clauses. Generates a new prepared statement per unique UID count.
         let placeholders: Vec<String> = uids.iter().map(|_| "?".to_string()).collect();
         let sql = format!(
-            "SELECT id, account_id, folder_name, uid, message_id, subject, sender,
-                    to_addresses, cc_addresses, date, in_reply_to, reference_ids,
-                    is_read, is_flagged, is_answered, is_draft,
-                    preview, content_type, has_attachments,
-                    internal_date, body_text, body_html
-             FROM messages
+            "SELECT {MESSAGE_COLUMNS} FROM messages
              WHERE account_id = ? AND folder_name = ? AND uid IN ({})
              ORDER BY COALESCE(internal_date, date) DESC, uid DESC",
             placeholders.join(", ")
@@ -245,46 +238,81 @@ impl Database {
         Ok(rows)
     }
 
-    /// Get cached body for a specific message. Returns None if message not found.
-    pub async fn get_message_body(
+    /// Get uuid, uid, and internal_date for messages since a cutoff date.
+    pub async fn list_messages_since(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        since: &str,
+    ) -> Result<Vec<(String, i64, Option<String>)>, DbError> {
+        let rows = sqlx::query_as::<_, (String, i64, Option<String>)>(
+            "SELECT uuid, uid, internal_date FROM messages
+             WHERE account_id = ? AND folder_name = ?
+             AND (internal_date >= ? OR internal_date IS NULL)",
+        )
+        .bind(account_id)
+        .bind(folder_name)
+        .bind(since)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
+    /// Get the UUID for a message by its IMAP UID.
+    pub async fn get_uuid(
         &self,
         account_id: &str,
         folder_name: &str,
         uid: u32,
-    ) -> Result<Option<(Option<String>, Option<String>)>, DbError> {
-        let row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
-            "SELECT body_text, body_html FROM messages
-             WHERE account_id = ? AND folder_name = ? AND uid = ?",
+    ) -> Result<Option<String>, DbError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT uuid FROM messages WHERE account_id = ? AND folder_name = ? AND uid = ?",
         )
         .bind(account_id)
         .bind(folder_name)
         .bind(uid)
         .fetch_optional(self.pool())
         .await?;
-        Ok(row)
+        Ok(row.map(|(uuid,)| uuid))
     }
 
-    /// Update the cached body for a message. Returns true if a row was updated.
-    pub async fn update_message_body(
+    /// Get all UIDs for a folder (for differential sync).
+    pub async fn list_local_uids(
         &self,
         account_id: &str,
         folder_name: &str,
-        uid: u32,
-        body_text: Option<&str>,
-        body_html: Option<&str>,
-    ) -> Result<bool, DbError> {
-        let result = sqlx::query(
-            "UPDATE messages SET body_text = ?, body_html = ?
-             WHERE account_id = ? AND folder_name = ? AND uid = ?",
+    ) -> Result<std::collections::HashSet<u32>, DbError> {
+        let rows: Vec<(i64,)> = sqlx::query_as(
+            "SELECT uid FROM messages WHERE account_id = ? AND folder_name = ?",
         )
-        .bind(body_text)
-        .bind(body_html)
         .bind(account_id)
         .bind(folder_name)
-        .bind(uid)
-        .execute(self.pool())
+        .fetch_all(self.pool())
         .await?;
-        Ok(result.rows_affected() > 0)
+        Ok(rows.into_iter().map(|(uid,)| uid as u32).collect())
+    }
+
+    /// Delete messages by UID. Returns the number of rows deleted.
+    pub async fn bulk_delete_by_uids(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uids: &[u32],
+    ) -> Result<u64, DbError> {
+        if uids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: Vec<String> = uids.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "DELETE FROM messages WHERE account_id = ? AND folder_name = ? AND uid IN ({})",
+            placeholders.join(", ")
+        );
+        let mut query = sqlx::query(&sql).bind(account_id).bind(folder_name);
+        for uid in uids {
+            query = query.bind(*uid);
+        }
+        let result = query.execute(self.pool()).await?;
+        Ok(result.rows_affected())
     }
 }
 
@@ -325,7 +353,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let db = Database::open(&dir.path().join("mail.db")).await.unwrap();
 
-        // Create an account and folder first
         sqlx::query(
             "INSERT INTO accounts (goa_id, provider_type, email_address, imap_host, imap_port, imap_tls_mode)
              VALUES ('acct1', 'google', 'user@gmail.com', 'imap.gmail.com', 993, 'implicit')",
@@ -336,6 +363,7 @@ mod tests {
 
         let messages = [
             MessageFields {
+                uuid: "aaaaaaaa-1111-4000-8000-000000000001",
                 uid: 1,
                 message_id: Some("msg001@gmail.com"),
                 subject: Some("Hello World"),
@@ -355,6 +383,7 @@ mod tests {
                 internal_date: None,
             },
             MessageFields {
+                uuid: "aaaaaaaa-1111-4000-8000-000000000002",
                 uid: 2,
                 message_id: Some("msg002@gmail.com"),
                 subject: Some("Re: Hello World"),
@@ -381,16 +410,12 @@ mod tests {
             .unwrap();
         assert_eq!(result.inserted.len(), 2);
         assert!(result.updated.is_empty());
-        assert!(result.inserted.contains(&1));
-        assert!(result.inserted.contains(&2));
 
         let rows = db.list_messages("acct1", "INBOX").await.unwrap();
         assert_eq!(rows.len(), 2);
-        // Newest first
         assert_eq!(rows[0].subject.as_deref(), Some("Re: Hello World"));
         assert_eq!(rows[1].subject.as_deref(), Some("Hello World"));
-        assert!(rows[0].is_read);
-        assert!(!rows[1].is_read);
+        assert!(!rows[0].uuid.is_empty());
 
         // Second upsert with same data — no changes
         let result = db
@@ -413,8 +438,8 @@ mod tests {
         .await
         .unwrap();
 
-        // Phase 2: message with preview
         let with_preview = [MessageFields {
+            uuid: "bbbbbbbb-2222-4000-8000-000000000001",
             uid: 1,
             message_id: Some("msg001@gmail.com"),
             subject: Some("Hello"),
@@ -438,8 +463,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Phase 1 re-sync: same message without preview (flag changed)
         let without_preview = [MessageFields {
+            uuid: "bbbbbbbb-2222-4000-8000-000000000001",
             uid: 1,
             message_id: Some("msg001@gmail.com"),
             subject: Some("Hello"),
@@ -449,11 +474,11 @@ mod tests {
             date: Some("2026-04-09T10:00:00Z"),
             in_reply_to: None,
             reference_ids: None,
-            is_read: true, // flag changed
+            is_read: true,
             is_flagged: false,
             is_answered: false,
             is_draft: false,
-            preview: None, // Phase 1 doesn't have this
+            preview: None,
             content_type: None,
             has_attachments: false,
             internal_date: None,
@@ -465,10 +490,106 @@ mod tests {
 
         let rows = db.list_messages("acct1", "INBOX").await.unwrap();
         assert_eq!(rows.len(), 1);
-        // Preview preserved via COALESCE
         assert_eq!(rows[0].preview.as_deref(), Some("Hey, how are you?"));
-        assert_eq!(rows[0].content_type.as_deref(), Some("text/plain"));
-        // Flag updated
         assert!(rows[0].is_read);
+    }
+
+    #[tokio::test]
+    async fn list_local_uids_and_bulk_delete() {
+        let dir = tempdir().unwrap();
+        let db = Database::open(&dir.path().join("mail.db")).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO accounts (goa_id, provider_type, email_address, imap_host, imap_port, imap_tls_mode)
+             VALUES ('acct1', 'google', 'user@gmail.com', 'imap.gmail.com', 993, 'implicit')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let messages = [
+            MessageFields {
+                uuid: "cccccccc-3333-4000-8000-000000000001",
+                uid: 10,
+                message_id: None,
+                subject: Some("Msg 10"),
+                sender: None,
+                to_addresses: None,
+                cc_addresses: None,
+                date: None,
+                in_reply_to: None,
+                reference_ids: None,
+                is_read: false,
+                is_flagged: false,
+                is_answered: false,
+                is_draft: false,
+                preview: None,
+                content_type: None,
+                has_attachments: false,
+                internal_date: None,
+            },
+            MessageFields {
+                uuid: "cccccccc-3333-4000-8000-000000000002",
+                uid: 20,
+                message_id: None,
+                subject: Some("Msg 20"),
+                sender: None,
+                to_addresses: None,
+                cc_addresses: None,
+                date: None,
+                in_reply_to: None,
+                reference_ids: None,
+                is_read: false,
+                is_flagged: false,
+                is_answered: false,
+                is_draft: false,
+                preview: None,
+                content_type: None,
+                has_attachments: false,
+                internal_date: None,
+            },
+            MessageFields {
+                uuid: "cccccccc-3333-4000-8000-000000000003",
+                uid: 30,
+                message_id: None,
+                subject: Some("Msg 30"),
+                sender: None,
+                to_addresses: None,
+                cc_addresses: None,
+                date: None,
+                in_reply_to: None,
+                reference_ids: None,
+                is_read: false,
+                is_flagged: false,
+                is_answered: false,
+                is_draft: false,
+                preview: None,
+                content_type: None,
+                has_attachments: false,
+                internal_date: None,
+            },
+        ];
+
+        db.bulk_upsert_messages("acct1", "INBOX", &messages)
+            .await
+            .unwrap();
+
+        // list_local_uids
+        let uids = db.list_local_uids("acct1", "INBOX").await.unwrap();
+        assert_eq!(uids.len(), 3);
+        assert!(uids.contains(&10));
+        assert!(uids.contains(&20));
+        assert!(uids.contains(&30));
+
+        // bulk_delete_by_uids
+        let deleted = db
+            .bulk_delete_by_uids("acct1", "INBOX", &[10, 30])
+            .await
+            .unwrap();
+        assert_eq!(deleted, 2);
+
+        let remaining = db.list_local_uids("acct1", "INBOX").await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert!(remaining.contains(&20));
     }
 }

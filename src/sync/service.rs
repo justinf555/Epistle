@@ -3,15 +3,20 @@ use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
 
+use gtk::gio;
+use gtk::prelude::*;
+use tokio::sync::mpsc;
+
 use crate::app_event::AppEvent;
-use crate::engine::pipeline::parse_body::parse_mime_body;
 use crate::engine::pipeline::EmailPipeline;
 use crate::engine::traits::accounts::{Account, MailAccounts};
 use crate::engine::traits::folders::{Folder, MailFolders};
 use crate::engine::traits::messages::{MailMessages, Message};
+use crate::engine::MailEngine;
 use crate::event_bus::EventSender;
 use crate::goa::types::{GoaMailAccount, ImapConfig, TlsMode};
 use crate::goa::GoaClient;
+use crate::sync::body_worker::{BodyWorker, FetchBodyRequest};
 use crate::sync::imap::ImapFolder;
 use crate::sync::pool::{max_connections_for_provider, SyncTaskPool};
 
@@ -32,25 +37,56 @@ pub struct SyncEngine {
     accounts: Arc<dyn MailAccounts>,
     folders: Arc<dyn MailFolders>,
     messages: Arc<dyn MailMessages>,
+    #[allow(dead_code)] // Used for IDLE notifications and sync progress events
     sender: EventSender,
     pipeline: EmailPipeline,
     running: std::sync::atomic::AtomicBool,
-    /// Cached IMAP configs keyed by GOA account ID, populated after initial sync.
-    imap_configs: tokio::sync::RwLock<HashMap<String, ImapConfig>>,
-    /// Cached provider types keyed by GOA account ID, for connection limit lookup.
-    provider_types: tokio::sync::RwLock<HashMap<String, String>>,
+    /// Cached IMAP configs — shared with BodyWorker.
+    imap_configs: Arc<tokio::sync::RwLock<HashMap<String, ImapConfig>>>,
+    /// Cached provider types — shared with BodyWorker.
+    provider_types: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    /// Priority body fetch channel (user-initiated).
+    body_priority_tx: mpsc::Sender<FetchBodyRequest>,
+    /// Background body fetch channel (header worker prefetch).
+    body_background_tx: mpsc::Sender<FetchBodyRequest>,
+    /// Number of days of message bodies to prefetch. 0 = disabled.
+    prefetch_days: u32,
 }
 
 impl SyncEngine {
     /// Create a new SyncEngine. Connects to GOA over D-Bus.
     pub async fn new(
-        accounts: Arc<dyn MailAccounts>,
-        folders: Arc<dyn MailFolders>,
-        messages: Arc<dyn MailMessages>,
-        sender: EventSender,
+        engine: &MailEngine,
+        settings: &gio::Settings,
     ) -> anyhow::Result<Arc<Self>> {
+        let accounts = engine.accounts();
+        let folders = engine.folders();
+        let messages = engine.messages();
+        let body_store = engine.body_store();
+        let sender = engine.sender();
+        let prefetch_days = settings.int("sync-body-prefetch-days").max(0) as u32;
+
         let goa = Arc::new(tokio::sync::Mutex::new(GoaClient::new().await?));
         let pool = Arc::new(SyncTaskPool::new(Arc::clone(&goa)));
+
+        let imap_configs = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let provider_types = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+        let (body_priority_tx, body_priority_rx) = mpsc::channel::<FetchBodyRequest>(32);
+        let (body_background_tx, body_background_rx) = mpsc::channel::<FetchBodyRequest>(512);
+
+        // Spawn the body worker
+        let mut worker = BodyWorker::new(
+            body_priority_rx,
+            body_background_rx,
+            Arc::clone(&pool),
+            body_store,
+            sender.clone(),
+            Arc::clone(&imap_configs),
+            Arc::clone(&provider_types),
+        );
+        tokio::spawn(async move { worker.run().await });
+
         Ok(Arc::new(Self {
             goa,
             pool,
@@ -60,8 +96,11 @@ impl SyncEngine {
             sender,
             pipeline: EmailPipeline::new(),
             running: std::sync::atomic::AtomicBool::new(false),
-            imap_configs: tokio::sync::RwLock::new(HashMap::new()),
-            provider_types: tokio::sync::RwLock::new(HashMap::new()),
+            imap_configs,
+            provider_types,
+            body_priority_tx,
+            body_background_tx,
+            prefetch_days,
         }))
     }
 
@@ -98,14 +137,25 @@ impl SyncEngine {
                     let folder_name = folder_name.clone();
                     let uid = *uid;
                     tokio::spawn(async move {
-                        if let Err(e) = engine.fetch_and_cache_body(&account_id, &folder_name, uid).await {
-                            error!(
-                                account_id = %account_id,
-                                folder_name = %folder_name,
-                                uid,
-                                error = %e,
-                                "Body fetch failed"
-                            );
+                        // Look up UUID for this message
+                        let uuid = match engine.messages.get_uuid(&account_id, &folder_name, uid).await {
+                            Ok(Some(u)) => u,
+                            Ok(None) => {
+                                warn!(uid, "No UUID found for body request");
+                                return;
+                            }
+                            Err(e) => {
+                                error!(uid, error = %e, "UUID lookup failed");
+                                return;
+                            }
+                        };
+                        if let Err(e) = engine.body_priority_tx.send(FetchBodyRequest {
+                            uid,
+                            uuid,
+                            account_id,
+                            folder_name,
+                        }).await {
+                            error!(error = %e, "Failed to send priority body request");
                         }
                     });
                 }
@@ -235,255 +285,279 @@ impl SyncEngine {
 
         futures::future::join_all(futures).await;
 
-        // ── Fetch messages from all folders ───────────────────────────────
-        // Parallel across accounts, sequential across folders within each
-        // account to avoid IMAP throttling during initial sync.
+        // ── Sync messages for all folders ────────────────────────────────
+        // Two-stage pipeline per folder:
+        //   Stage 1 (ID sync): uid_search → diff → delete removed
+        //   Stage 2 (Header fetch): uid_fetch envelopes for new UIDs, newest first
         //
-        // Re-acquire IMAP credentials for message fetch (tokens may have refreshed)
-        let mut msg_tasks = Vec::new();
-        {
-            let goa = self.goa.lock().await;
-            for (account, goa_account) in domain_accounts.iter().zip(goa_accounts.iter()) {
-                debug!(email = %account.email_address, "Fetching IMAP credentials for message sync");
-                match goa.get_imap_auth(&account.goa_id).await {
-                    Ok(auth) => {
-                        msg_tasks.push((account.clone(), goa_account.imap_config.clone(), auth));
-                    }
-                    Err(e) => {
-                        warn!(
-                            email = %account.email_address,
-                            error = %e,
-                            "Failed to get IMAP credentials for message sync"
-                        );
-                    }
+        // Sequential per folder within each account to avoid IMAP throttling.
+        for account in &domain_accounts {
+            let mut account_folders = match self.folders.list_folders(&account.goa_id).await {
+                Ok(f) => f,
+                Err(e) => {
+                    error!(
+                        email = %account.email_address,
+                        error = %e,
+                        "Failed to list folders for message sync"
+                    );
+                    continue;
+                }
+            };
+            account_folders.sort_by_key(|f| folder_priority(f.role.as_deref()));
+
+            info!(
+                email = %account.email_address,
+                folder_count = account_folders.len(),
+                "Syncing messages across all folders"
+            );
+
+            let config = {
+                let configs = self.imap_configs.read().await;
+                configs.get(&account.goa_id).cloned()
+            };
+            let config = match config {
+                Some(c) => c,
+                None => {
+                    error!(email = %account.email_address, "No cached IMAP config");
+                    continue;
+                }
+            };
+
+            let max_conns = {
+                let providers = self.provider_types.read().await;
+                providers
+                    .get(&account.goa_id)
+                    .map(|p| max_connections_for_provider(p))
+                    .unwrap_or(10)
+            };
+
+            for folder in &account_folders {
+                if let Err(e) = self
+                    .sync_folder(&account.goa_id, &folder.name, &config, max_conns)
+                    .await
+                {
+                    error!(
+                        email = %account.email_address,
+                        folder = %folder.name,
+                        error = %e,
+                        "Folder sync failed"
+                    );
                 }
             }
         }
 
-        debug!(count = msg_tasks.len(), "Starting multi-folder message fetch");
-        let msg_futures: Vec<_> = msg_tasks
-            .into_iter()
-            .map(|(account, config, auth)| {
-                let messages_impl = Arc::clone(&self.messages);
-                let folders_impl = Arc::clone(&self.folders);
-                let pipeline = &self.pipeline;
-                async move {
-                    // Get synced folders for this account, sorted by priority
-                    let mut account_folders = match folders_impl.list_folders(&account.goa_id).await {
-                        Ok(f) => f,
-                        Err(e) => {
-                            error!(
-                                email = %account.email_address,
-                                error = %e,
-                                "Failed to list folders for message sync"
-                            );
-                            return;
-                        }
-                    };
-                    account_folders.sort_by_key(|f| folder_priority(f.role.as_deref()));
-
-                    info!(
-                        email = %account.email_address,
-                        folder_count = account_folders.len(),
-                        "Syncing messages across all folders"
-                    );
-
-                    // Sequential per folder within this account
-                    for folder in &account_folders {
-                        debug!(
-                            email = %account.email_address,
-                            folder = %folder.name,
-                            role = ?folder.role,
-                            batch_size = FETCH_BATCH_SIZE,
-                            "Fetching messages for folder"
-                        );
-                        match crate::sync::imap::fetch_messages(
-                            &config,
-                            &auth,
-                            &folder.name,
-                            FETCH_BATCH_SIZE,
-                        )
-                        .await
-                        {
-                            Ok(raw_emails) => {
-                                let messages: Vec<Message> = raw_emails
-                                    .iter()
-                                    .map(|raw| {
-                                        let mut msg = Message {
-                                            uid: raw.uid,
-                                            account_id: account.goa_id.clone(),
-                                            folder_name: folder.name.clone(),
-                                            message_id: None,
-                                            subject: None,
-                                            sender: None,
-                                            to_addresses: vec![],
-                                            cc_addresses: vec![],
-                                            date: None,
-                                            in_reply_to: None,
-                                            references: vec![],
-                                            is_read: false,
-                                            is_flagged: false,
-                                            is_answered: false,
-                                            is_draft: false,
-                                            preview: None,
-                                            content_type: None,
-                                            has_attachments: false,
-                                            internal_date: None,
-                                            body_text: None,
-                                            body_html: None,
-                                        };
-                                        pipeline.process(&mut msg, raw);
-                                        msg
-                                    })
-                                    .collect();
-
-                                info!(
-                                    email = %account.email_address,
-                                    count = messages.len(),
-                                    folder = %folder.name,
-                                    "Synced messages"
-                                );
-
-                                if let Err(e) = messages_impl
-                                    .sync_messages(&account.goa_id, &folder.name, &messages)
-                                    .await
-                                {
-                                    error!(
-                                        email = %account.email_address,
-                                        folder = %folder.name,
-                                        error = %e,
-                                        "Failed to persist messages"
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    email = %account.email_address,
-                                    folder = %folder.name,
-                                    error = %e,
-                                    "IMAP message fetch failed"
-                                );
-                            }
-                        }
-                    }
-                }
-            })
-            .collect();
-
-        futures::future::join_all(msg_futures).await;
+        // Queue body prefetch for messages within the window that may be missing .eml files.
+        // The body worker will skip messages that already have files on disk.
+        if self.prefetch_days > 0 {
+            self.backfill_missing_bodies(&domain_accounts).await;
+        }
 
         info!("Initial sync complete");
         Ok(())
     }
 
-    /// Fetch a single message body from IMAP, parse MIME, cache in DB, emit event.
-    async fn fetch_and_cache_body(
-        &self,
-        account_id: &str,
-        folder_name: &str,
-        uid: u32,
-    ) -> anyhow::Result<()> {
-        debug!(account_id, folder_name, uid, "Fetching message body");
+    /// Queue body fetches for messages within the prefetch window that may be
+    /// missing .eml files (e.g., app was quit before prefetch completed).
+    /// The body worker checks disk before fetching, so duplicates are harmless.
+    async fn backfill_missing_bodies(&self, accounts: &[Account]) {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(self.prefetch_days as i64);
+        let cutoff_str = cutoff.to_rfc3339();
+        let mut queued = 0u32;
 
-        // Check DB cache first
-        if let Some(body) = self.messages.get_body(account_id, folder_name, uid).await? {
-            if body.body_text.is_some() || body.body_html.is_some() {
-                debug!(uid, "Body already cached, emitting from cache");
-                self.sender.send(AppEvent::MessageBodyFetched {
-                    account_id: account_id.to_string(),
-                    folder_name: folder_name.to_string(),
-                    uid,
-                    body,
-                });
-                return Ok(());
+        for account in accounts {
+            let folders = match self.folders.list_folders(&account.goa_id).await {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+
+            for folder in &folders {
+                let messages = match self
+                    .messages
+                    .list_messages_since(&account.goa_id, &folder.name, &cutoff_str)
+                    .await
+                {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+
+                for (uuid, uid, _date) in messages {
+                    let _ = self.body_background_tx.try_send(FetchBodyRequest {
+                        uid,
+                        uuid,
+                        account_id: account.goa_id.clone(),
+                        folder_name: folder.name.clone(),
+                    });
+                    queued += 1;
+                }
             }
         }
 
-        // Get IMAP config from cache (populated during initial sync)
-        let config = {
-            let configs = self.imap_configs.read().await;
-            configs.get(account_id).cloned()
-        };
-        let config = match config {
-            Some(c) => c,
-            None => {
-                // Cache miss — re-discover from GOA (e.g. new account added)
-                warn!(account_id, "IMAP config not cached, re-discovering from GOA");
-                let c = {
-                    let mut goa = self.goa.lock().await;
-                    let goa_accounts = goa.discover_accounts().await?;
-                    goa_accounts
-                        .iter()
-                        .find(|a| a.goa_id == account_id)
-                        .map(|a| a.imap_config.clone())
-                        .ok_or_else(|| anyhow::anyhow!("Account {account_id} not found in GOA"))?
-                    // goa guard dropped here
-                };
-                self.imap_configs.write().await.insert(account_id.to_string(), c.clone());
-                c
+        if queued > 0 {
+            info!(queued, prefetch_days = self.prefetch_days, "Queued body backfill");
+        }
+    }
+
+    /// Two-stage folder sync: ID sync (diff UIDs) then header fetch (envelopes).
+    async fn sync_folder(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        config: &ImapConfig,
+        max_conns: usize,
+    ) -> anyhow::Result<()> {
+        // ── Stage 1: ID Sync ────────────────────────────────────────────
+        // Get all UIDs from server, diff against local, delete removed.
+        let new_uids = {
+            let mut guard = self.pool.acquire(account_id, config, max_conns).await?;
+            let session = guard.session();
+            session.select(folder_name).await?;
+
+            let server_uids = match session.uid_search("ALL").await {
+                Ok(uids) => uids,
+                Err(e) => {
+                    guard.poison();
+                    return Err(e.into());
+                }
+            };
+
+            let local_uids = self.messages.list_local_uids(account_id, folder_name).await?;
+
+            // Delete messages that no longer exist on server
+            let deleted_uids: Vec<u32> = local_uids.difference(&server_uids).copied().collect();
+            if !deleted_uids.is_empty() {
+                let count = self
+                    .messages
+                    .delete_messages_by_uids(account_id, folder_name, &deleted_uids)
+                    .await?;
+                info!(account_id, folder_name, count, "Removed deleted messages");
             }
-        };
 
-        let max_conns = {
-            let providers = self.provider_types.read().await;
-            providers
-                .get(account_id)
-                .map(|p| max_connections_for_provider(p))
-                .unwrap_or(10)
-        };
+            // New UIDs to fetch, sorted descending (newest first)
+            let mut new: Vec<u32> = server_uids.difference(&local_uids).copied().collect();
+            new.sort_unstable_by(|a, b| b.cmp(a));
 
-        // Acquire pooled connection and fetch body
-        let mut guard = self.pool.acquire(account_id, &config, max_conns).await?;
-        let session = guard.session();
-
-        session.select(folder_name).await?;
-
-        let uid_str = uid.to_string();
-        let fetches = session.uid_fetch(&uid_str, "BODY[]").await;
-        let fetches = match fetches {
-            Ok(f) => f,
-            Err(e) => {
-                guard.poison();
-                return Err(e.into());
-            }
-        };
-
-        let raw_bytes = fetches
-            .iter()
-            .find_map(|f| f.body().map(|b| b.to_vec()))
-            .ok_or_else(|| crate::sync::imap::ImapError::MessageNotFound { uid })?;
-
-        // Parse MIME
-        let body = parse_mime_body(&raw_bytes);
-
-        // Cache in DB
-        self.messages
-            .cache_body(
+            debug!(
                 account_id,
                 folder_name,
-                uid,
-                body.body_text.as_deref(),
-                body.body_html.as_deref(),
-            )
-            .await?;
+                server = server_uids.len(),
+                local = local_uids.len(),
+                new = new.len(),
+                deleted = deleted_uids.len(),
+                "ID sync complete"
+            );
 
-        debug!(
-            uid,
-            has_html = body.body_html.is_some(),
-            has_text = body.body_text.is_some(),
-            "Body fetched and cached"
-        );
+            new
+            // guard dropped — connection returned to pool
+        };
 
-        // Emit event
-        self.sender.send(AppEvent::MessageBodyFetched {
-            account_id: account_id.to_string(),
-            folder_name: folder_name.to_string(),
-            uid,
-            body,
-        });
+        if new_uids.is_empty() {
+            return Ok(());
+        }
+
+        // ── Stage 2: Header Fetch ───────────────────────────────────────
+        // Fetch envelopes in batches of FETCH_BATCH_SIZE, newest first.
+        for batch in new_uids.chunks(FETCH_BATCH_SIZE as usize) {
+            let uid_set = batch
+                .iter()
+                .map(|u| u.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+
+            let mut guard = self.pool.acquire(account_id, config, max_conns).await?;
+            let session = guard.session();
+            session.select(folder_name).await?;
+
+            let fetches = match session
+                .uid_fetch(&uid_set, "(UID ENVELOPE FLAGS INTERNALDATE)")
+                .await
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    guard.poison();
+                    return Err(e.into());
+                }
+            };
+
+            let messages: Vec<Message> = fetches
+                .iter()
+                .filter_map(|fetch| {
+                    let raw = crate::sync::imap::fetch_to_raw_email(fetch)?;
+                    let mut msg = Message {
+                        uuid: uuid::Uuid::new_v4().to_string(),
+                        uid: raw.uid,
+                        account_id: account_id.to_string(),
+                        folder_name: folder_name.to_string(),
+                        message_id: None,
+                        subject: None,
+                        sender: None,
+                        to_addresses: vec![],
+                        cc_addresses: vec![],
+                        date: None,
+                        in_reply_to: None,
+                        references: vec![],
+                        is_read: false,
+                        is_flagged: false,
+                        is_answered: false,
+                        is_draft: false,
+                        preview: None,
+                        content_type: None,
+                        has_attachments: false,
+                        internal_date: None,
+                    };
+                    self.pipeline.process(&mut msg, &raw);
+                    Some(msg)
+                })
+                .collect();
+
+            info!(
+                account_id,
+                folder_name,
+                count = messages.len(),
+                "Fetched message headers"
+            );
+
+            if let Err(e) = self
+                .messages
+                .sync_messages(account_id, folder_name, &messages)
+                .await
+            {
+                error!(
+                    account_id,
+                    folder_name,
+                    error = %e,
+                    "Failed to persist messages"
+                );
+            }
+
+            // Queue body prefetch for messages within the prefetch window
+            let prefetch_days = self.prefetch_days;
+            if prefetch_days > 0 {
+                let cutoff = chrono::Utc::now() - chrono::Duration::days(prefetch_days as i64);
+                for msg in &messages {
+                    let within_window = msg
+                        .internal_date
+                        .as_deref()
+                        .and_then(|d| chrono::DateTime::parse_from_rfc3339(d).ok())
+                        .map(|d| d >= cutoff)
+                        .unwrap_or(true); // prefetch if no date (be generous)
+
+                    if within_window {
+                        let _ = self.body_background_tx.try_send(FetchBodyRequest {
+                            uid: msg.uid,
+                            uuid: msg.uuid.clone(),
+                            account_id: account_id.to_string(),
+                            folder_name: folder_name.to_string(),
+                        });
+                    }
+                }
+            }
+
+            // guard dropped — connection returned to pool
+        }
 
         Ok(())
     }
+
 }
 
 // ── Protocol → Domain conversions ───────────────────────────────────────────
