@@ -130,6 +130,13 @@ impl BodyWorker {
         };
 
         // Fetch from IMAP
+        debug!(
+            uid = req.uid,
+            uuid = %req.uuid,
+            account_id = %req.account_id,
+            folder = %req.folder_name,
+            "Fetching body from IMAP"
+        );
         let mut guard = self.pool.acquire(&req.account_id, &config, max_conns).await?;
         let session = guard.session();
 
@@ -161,6 +168,7 @@ impl BodyWorker {
         debug!(
             uid = req.uid,
             uuid = %req.uuid,
+            bytes = raw_bytes.len(),
             has_html = body.body_html.is_some(),
             has_text = body.body_text.is_some(),
             "Body fetched and stored"
