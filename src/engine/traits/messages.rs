@@ -92,6 +92,14 @@ pub trait MailMessages: Send + Sync {
         offset: u32,
     ) -> anyhow::Result<Vec<Message>>;
 
+    /// Get the UUID for a message by its IMAP UID.
+    async fn get_uuid(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+    ) -> anyhow::Result<Option<String>>;
+
     /// Get all UIDs for a folder (for differential sync).
     async fn list_local_uids(
         &self,

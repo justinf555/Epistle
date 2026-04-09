@@ -161,6 +161,15 @@ impl MailMessages for MailMessagesImpl {
         Ok(rows.into_iter().map(row_to_message).collect())
     }
 
+    async fn get_uuid(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+    ) -> anyhow::Result<Option<String>> {
+        Ok(self.db.get_uuid(account_id, folder_name, uid).await?)
+    }
+
     async fn list_local_uids(
         &self,
         account_id: &str,

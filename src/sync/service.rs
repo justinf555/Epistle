@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::app_event::AppEvent;
+use crate::engine::body_store::BodyStore;
 use crate::engine::pipeline::parse_body::parse_mime_body;
 use crate::engine::pipeline::EmailPipeline;
 use crate::engine::traits::accounts::{Account, MailAccounts};
@@ -32,6 +33,7 @@ pub struct SyncEngine {
     accounts: Arc<dyn MailAccounts>,
     folders: Arc<dyn MailFolders>,
     messages: Arc<dyn MailMessages>,
+    body_store: Arc<BodyStore>,
     sender: EventSender,
     pipeline: EmailPipeline,
     running: std::sync::atomic::AtomicBool,
@@ -47,6 +49,7 @@ impl SyncEngine {
         accounts: Arc<dyn MailAccounts>,
         folders: Arc<dyn MailFolders>,
         messages: Arc<dyn MailMessages>,
+        body_store: Arc<BodyStore>,
         sender: EventSender,
     ) -> anyhow::Result<Arc<Self>> {
         let goa = Arc::new(tokio::sync::Mutex::new(GoaClient::new().await?));
@@ -57,6 +60,7 @@ impl SyncEngine {
             accounts,
             folders,
             messages,
+            body_store,
             sender,
             pipeline: EmailPipeline::new(),
             running: std::sync::atomic::AtomicBool::new(false),
@@ -438,7 +442,7 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// Fetch a single message body from IMAP, parse MIME, and emit event.
+    /// Fetch a single message body from IMAP, store as .eml, parse, and emit event.
     async fn fetch_and_emit_body(
         &self,
         account_id: &str,
@@ -447,7 +451,32 @@ impl SyncEngine {
     ) -> anyhow::Result<()> {
         debug!(account_id, folder_name, uid, "Fetching message body");
 
-        // Get IMAP config from cache (populated during initial sync)
+        // Look up the UUID for this message
+        let uuid = self.messages.get_uuid(account_id, folder_name, uid).await?;
+        let uuid = match uuid {
+            Some(u) => u,
+            None => {
+                warn!(uid, "No UUID found for message — cannot store body");
+                return Ok(());
+            }
+        };
+
+        // Check if .eml already exists on disk
+        if self.body_store.has_eml(&uuid).await {
+            debug!(uid, uuid = %uuid, "Body already on disk, parsing from file");
+            if let Some(raw) = self.body_store.read_eml(&uuid).await? {
+                let body = parse_mime_body(&raw);
+                self.sender.send(AppEvent::MessageBodyFetched {
+                    account_id: account_id.to_string(),
+                    folder_name: folder_name.to_string(),
+                    uid,
+                    body,
+                });
+                return Ok(());
+            }
+        }
+
+        // Get IMAP config from cache
         let config = {
             let configs = self.imap_configs.read().await;
             configs.get(account_id).cloned()
@@ -499,17 +528,21 @@ impl SyncEngine {
             .find_map(|f| f.body().map(|b| b.to_vec()))
             .ok_or_else(|| crate::sync::imap::ImapError::MessageNotFound { uid })?;
 
-        // Parse MIME
+        // Store .eml to filesystem
+        self.body_store.store_eml(&uuid, &raw_bytes).await
+            .map_err(|e| anyhow::anyhow!("Failed to store .eml: {e}"))?;
+
+        // Parse MIME and emit event
         let body = parse_mime_body(&raw_bytes);
 
         debug!(
             uid,
+            uuid = %uuid,
             has_html = body.body_html.is_some(),
             has_text = body.body_text.is_some(),
-            "Body fetched"
+            "Body fetched and stored"
         );
 
-        // Emit event
         self.sender.send(AppEvent::MessageBodyFetched {
             account_id: account_id.to_string(),
             folder_name: folder_name.to_string(),

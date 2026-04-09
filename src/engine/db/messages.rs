@@ -238,6 +238,24 @@ impl Database {
         Ok(rows)
     }
 
+    /// Get the UUID for a message by its IMAP UID.
+    pub async fn get_uuid(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+    ) -> Result<Option<String>, DbError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT uuid FROM messages WHERE account_id = ? AND folder_name = ? AND uid = ?",
+        )
+        .bind(account_id)
+        .bind(folder_name)
+        .bind(uid)
+        .fetch_optional(self.pool())
+        .await?;
+        Ok(row.map(|(uuid,)| uuid))
+    }
+
     /// Get all UIDs for a folder (for differential sync).
     pub async fn list_local_uids(
         &self,

@@ -63,6 +63,7 @@ fn main() -> glib::ExitCode {
         engine.accounts(),
         engine.folders(),
         engine.messages(),
+        engine.body_store(),
         engine.sender(),
     )).expect("Failed to initialize sync engine");
     sync.start();
