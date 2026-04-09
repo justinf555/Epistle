@@ -26,8 +26,10 @@ pub struct Message {
     pub to_addresses: Vec<String>,
     /// Decoded Cc addresses.
     pub cc_addresses: Vec<String>,
-    /// Parsed date in ISO 8601 / RFC 3339 format.
+    /// Parsed date in ISO 8601 / RFC 3339 format (from sender's Date header).
     pub date: Option<String>,
+    /// Server-received date (IMAP INTERNALDATE) — used for sorting.
+    pub internal_date: Option<String>,
     /// In-Reply-To header (for threading).
     pub in_reply_to: Option<String>,
     /// References header (space-separated Message-IDs, for threading).

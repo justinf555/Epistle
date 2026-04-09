@@ -26,6 +26,8 @@ mod imp {
         #[property(get, set, nullable)]
         pub date: RefCell<Option<String>>,
         #[property(get, set, nullable)]
+        pub internal_date: RefCell<Option<String>>,
+        #[property(get, set, nullable)]
         pub preview: RefCell<Option<String>>,
         #[property(get, set)]
         pub is_read: Cell<bool>,
@@ -57,6 +59,7 @@ impl MessageObject {
         obj.set_sender(msg.sender.clone());
         obj.set_subject(msg.subject.clone());
         obj.set_date(msg.date.clone());
+        obj.set_internal_date(msg.internal_date.clone());
         obj.set_preview(msg.preview.clone());
         obj.set_is_read(msg.is_read);
         obj.set_is_flagged(msg.is_flagged);

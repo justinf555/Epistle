@@ -274,6 +274,7 @@ impl SyncEngine {
                                         preview: None,
                                         content_type: None,
                                         has_attachments: false,
+                                        internal_date: None,
                                         body_text: None,
                                         body_html: None,
                                     };

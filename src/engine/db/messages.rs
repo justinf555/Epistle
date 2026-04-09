@@ -23,6 +23,7 @@ pub struct MessageRow {
     pub preview: Option<String>,
     pub content_type: Option<String>,
     pub has_attachments: bool,
+    pub internal_date: Option<String>,
     pub body_text: Option<String>,
     pub body_html: Option<String>,
 }
@@ -45,6 +46,7 @@ pub struct MessageFields<'a> {
     pub preview: Option<&'a str>,
     pub content_type: Option<&'a str>,
     pub has_attachments: bool,
+    pub internal_date: Option<&'a str>,
 }
 
 /// Result of a bulk upsert — which UIDs were inserted, updated, or unchanged.
@@ -99,9 +101,9 @@ impl Database {
                     account_id, folder_name, uid, message_id, subject, sender,
                     to_addresses, cc_addresses, date, in_reply_to, reference_ids,
                     is_read, is_flagged, is_answered, is_draft,
-                    preview, content_type, has_attachments, content_hash
+                    preview, content_type, has_attachments, internal_date, content_hash
                  )
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(account_id, folder_name, uid) DO UPDATE SET
                      message_id    = excluded.message_id,
                      subject       = excluded.subject,
@@ -118,6 +120,7 @@ impl Database {
                      preview       = COALESCE(excluded.preview, messages.preview),
                      content_type  = COALESCE(excluded.content_type, messages.content_type),
                      has_attachments = excluded.has_attachments,
+                     internal_date = COALESCE(excluded.internal_date, messages.internal_date),
                      content_hash  = excluded.content_hash
                  WHERE content_hash IS NOT excluded.content_hash",
             )
@@ -139,6 +142,7 @@ impl Database {
             .bind(msg.preview)
             .bind(msg.content_type)
             .bind(msg.has_attachments)
+            .bind(msg.internal_date)
             .bind(&hash)
             .execute(&mut *tx)
             .await?;
@@ -167,10 +171,10 @@ impl Database {
                     to_addresses, cc_addresses, date, in_reply_to, reference_ids,
                     is_read, is_flagged, is_answered, is_draft,
                     preview, content_type, has_attachments,
-                    body_text, body_html
+                    internal_date, body_text, body_html
              FROM messages
              WHERE account_id = ? AND folder_name = ?
-             ORDER BY date DESC, uid DESC",
+             ORDER BY COALESCE(internal_date, date) DESC, uid DESC",
         )
         .bind(account_id)
         .bind(folder_name)
@@ -196,10 +200,10 @@ impl Database {
                     to_addresses, cc_addresses, date, in_reply_to, reference_ids,
                     is_read, is_flagged, is_answered, is_draft,
                     preview, content_type, has_attachments,
-                    body_text, body_html
+                    internal_date, body_text, body_html
              FROM messages
              WHERE account_id = ? AND folder_name = ? AND uid IN ({})
-             ORDER BY date DESC, uid DESC",
+             ORDER BY COALESCE(internal_date, date) DESC, uid DESC",
             placeholders.join(", ")
         );
         let mut query = sqlx::query_as::<_, MessageRow>(&sql)
@@ -277,6 +281,8 @@ fn message_content_hash(m: &MessageFields<'_>) -> String {
     hasher.update(m.content_type.unwrap_or("").as_bytes());
     hasher.update(b"|");
     hasher.update(if m.has_attachments { b"1" } else { b"0" });
+    hasher.update(b"|");
+    hasher.update(m.internal_date.unwrap_or("").as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
@@ -317,6 +323,7 @@ mod tests {
                 preview: None,
                 content_type: None,
                 has_attachments: false,
+                internal_date: None,
             },
             MessageFields {
                 uid: 2,
@@ -335,6 +342,7 @@ mod tests {
                 preview: None,
                 content_type: None,
                 has_attachments: false,
+                internal_date: None,
             },
         ];
 
@@ -394,6 +402,7 @@ mod tests {
             preview: Some("Hey, how are you?"),
             content_type: Some("text/plain"),
             has_attachments: false,
+            internal_date: None,
         }];
 
         db.bulk_upsert_messages("acct1", "INBOX", &with_preview)
@@ -418,6 +427,7 @@ mod tests {
             preview: None, // Phase 1 doesn't have this
             content_type: None,
             has_attachments: false,
+            internal_date: None,
         }];
 
         db.bulk_upsert_messages("acct1", "INBOX", &without_preview)

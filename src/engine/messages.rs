@@ -70,6 +70,7 @@ impl MailMessages for MailMessagesImpl {
                 preview: m.preview.as_deref(),
                 content_type: m.content_type.as_deref(),
                 has_attachments: m.has_attachments,
+                internal_date: m.internal_date.as_deref(),
             })
             .collect();
 
@@ -191,6 +192,7 @@ fn row_to_message(row: crate::engine::db::messages::MessageRow) -> Message {
             .map(|s| s.split(", ").map(String::from).collect())
             .unwrap_or_default(),
         date: row.date,
+        internal_date: row.internal_date,
         in_reply_to: row.in_reply_to,
         references: row
             .reference_ids

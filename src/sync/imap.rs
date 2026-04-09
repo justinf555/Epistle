@@ -304,7 +304,7 @@ where
         // MIME-encoded filenames). Attachment detection deferred to Phase 2
         // when we parse the body ourselves with mail-parser.
         let fetches: Vec<_> = session
-            .fetch(&range, "(UID ENVELOPE FLAGS)")
+            .fetch(&range, "(UID ENVELOPE FLAGS INTERNALDATE)")
             .await?
             .try_collect()
             .await?;
@@ -339,6 +339,7 @@ where
                 date: None,
                 message_id: None,
                 in_reply_to: None,
+                internal_date: fetch.internal_date().map(|dt| dt.to_rfc3339()),
                 has_attachments: None,
                 body_text: None,
             };

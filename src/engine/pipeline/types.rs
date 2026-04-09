@@ -20,6 +20,9 @@ pub struct RawEmail {
     pub message_id: Option<Vec<u8>>,
     pub in_reply_to: Option<Vec<u8>>,
 
+    // Phase 1: INTERNALDATE (server-received time, used for sorting)
+    pub internal_date: Option<String>,
+
     // Phase 1: from BODYSTRUCTURE
     pub has_attachments: Option<bool>,
 

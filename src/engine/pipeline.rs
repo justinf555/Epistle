@@ -80,6 +80,7 @@ mod tests {
             to_addresses: vec![],
             cc_addresses: vec![],
             date: None,
+            internal_date: None,
             in_reply_to: None,
             references: vec![],
             is_read: false,
@@ -115,6 +116,7 @@ mod tests {
             date: Some(b"Mon, 9 Apr 2026 10:00:00 +0000".to_vec()),
             message_id: Some(b"<msg001@example.com>".to_vec()),
             in_reply_to: None,
+            internal_date: None,
             has_attachments: None,
             body_text: None,
         };
@@ -147,6 +149,7 @@ mod tests {
             date: None,
             message_id: None,
             in_reply_to: None,
+            internal_date: None,
             has_attachments: None,
             body_text: None,
         };
@@ -173,6 +176,7 @@ mod tests {
             date: None,
             message_id: None,
             in_reply_to: None,
+            internal_date: None,
             has_attachments: None,
             body_text: None,
         };
@@ -197,6 +201,7 @@ mod tests {
             date: None,
             message_id: None,
             in_reply_to: None,
+            internal_date: None,
             has_attachments: None,
             body_text: Some("Hello, this is the body of the email.".to_string()),
         };

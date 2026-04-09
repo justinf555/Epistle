@@ -59,9 +59,21 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
 
-            // Create the model (ListStore) and wire it with factory to ListView
+            // Create the model chain: ListStore → SortListModel → SingleSelection → ListView
             let store = gio::ListStore::new::<MessageObject>();
-            let selection = gtk::SingleSelection::new(Some(store.clone()));
+
+            // Sort by internal_date descending (newest first), fall back to date
+            let sorter = gtk::CustomSorter::new(move |a, b| {
+                let a = a.downcast_ref::<MessageObject>().unwrap();
+                let b = b.downcast_ref::<MessageObject>().unwrap();
+                let a_date = a.internal_date().or_else(|| a.date());
+                let b_date = b.internal_date().or_else(|| b.date());
+                // Reverse order: newest first
+                b_date.cmp(&a_date).into()
+            });
+            let sort_model = gtk::SortListModel::new(Some(store.clone()), Some(sorter));
+
+            let selection = gtk::SingleSelection::new(Some(sort_model));
             self.list_view.set_model(Some(&selection));
             self.list_view.set_factory(Some(&factory::build_factory()));
             self.store.set(store).expect("store set once in constructed");
