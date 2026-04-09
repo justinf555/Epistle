@@ -126,13 +126,31 @@ impl EpistleMessageList {
                 return;
             };
             match event {
-                AppEvent::MessagesChanged {
+                AppEvent::MessagesAdded {
                     folder_name,
                     messages,
                     ..
                 } => {
                     if folder_name == "INBOX" {
-                        list.on_messages_changed(messages);
+                        list.on_messages_added(messages);
+                    }
+                }
+                AppEvent::MessagesUpdated {
+                    folder_name,
+                    messages,
+                    ..
+                } => {
+                    if folder_name == "INBOX" {
+                        list.on_messages_updated(messages);
+                    }
+                }
+                AppEvent::MessagesRemoved {
+                    folder_name,
+                    uids,
+                    ..
+                } => {
+                    if folder_name == "INBOX" {
+                        list.on_messages_removed(uids);
                     }
                 }
                 _ => {}
@@ -174,7 +192,7 @@ impl EpistleMessageList {
                             count = cached_messages.len(),
                             "Loaded cached INBOX messages"
                         );
-                        list.on_messages_changed(&cached_messages);
+                        list.on_messages_added(&cached_messages);
                         return;
                     }
                 }
@@ -182,73 +200,78 @@ impl EpistleMessageList {
         });
     }
 
-    fn on_messages_changed(&self, messages: &[Message]) {
+    /// O(k) — insert new messages into the store.
+    fn on_messages_added(&self, messages: &[Message]) {
         let imp = self.imp();
         let store = imp.store.get().expect("store initialized");
-        let stack = &*imp.stack;
         let mut index = imp.uid_index.borrow_mut();
 
-        if messages.is_empty() {
-            store.remove_all();
-            index.clear();
-            stack.set_visible_child_name("empty");
-            return;
-        }
-
-        // Build set of incoming UIDs for O(1) membership test
-        let incoming: HashMap<u32, &Message> = messages.iter().map(|m| (m.uid, m)).collect();
-
-        // Pass 1: Update existing items in-place, collect stale indices
-        let mut stale_positions: Vec<u32> = Vec::new();
-        for (&uid, &pos) in index.iter() {
-            if let Some(msg) = incoming.get(&uid) {
-                let obj = store.item(pos).and_downcast::<MessageObject>().unwrap();
-                obj.update_from(msg);
-            } else {
-                stale_positions.push(pos);
-            }
-        }
-
-        // Pass 2: Remove stale items via splice (highest index first to keep positions valid)
-        stale_positions.sort_unstable_by(|a, b| b.cmp(a));
-        for pos in &stale_positions {
-            let obj = store.item(*pos).and_downcast::<MessageObject>().unwrap();
-            index.remove(&obj.uid());
-            store.remove(*pos);
-        }
-
-        // Rebuild index positions after removals (positions shifted)
-        index.clear();
-        for i in 0..store.n_items() {
-            let obj = store.item(i).and_downcast::<MessageObject>().unwrap();
-            index.insert(obj.uid(), i);
-        }
-
-        // Pass 3: Collect new items not in the store
-        let new_items: Vec<MessageObject> = messages
-            .iter()
-            .filter(|m| !index.contains_key(&m.uid))
-            .map(MessageObject::new)
-            .collect();
+        let new_items: Vec<MessageObject> = messages.iter().map(MessageObject::new).collect();
 
         if !new_items.is_empty() {
             let insert_pos = store.n_items();
             store.splice(insert_pos, 0, &new_items);
 
-            // Update index with new positions
             for (i, item) in new_items.iter().enumerate() {
                 index.insert(item.uid(), insert_pos + i as u32);
             }
         }
 
-        stack.set_visible_child_name("list");
+        if store.n_items() > 0 {
+            imp.stack.set_visible_child_name("list");
+        }
 
-        tracing::debug!(
-            count = store.n_items(),
-            updated = messages.len().saturating_sub(new_items.len()),
-            added = new_items.len(),
-            removed = stale_positions.len(),
-            "Message list model updated"
-        );
+        tracing::debug!(added = messages.len(), total = store.n_items(), "Messages added");
+    }
+
+    /// O(k) — update existing messages in place via index lookup.
+    fn on_messages_updated(&self, messages: &[Message]) {
+        let imp = self.imp();
+        let store = imp.store.get().expect("store initialized");
+        let index = imp.uid_index.borrow();
+
+        for msg in messages {
+            if let Some(&pos) = index.get(&msg.uid) {
+                if let Some(obj) = store.item(pos).and_downcast::<MessageObject>() {
+                    obj.update_from(msg);
+                }
+            }
+        }
+
+        tracing::debug!(updated = messages.len(), "Messages updated");
+    }
+
+    /// O(k) — remove messages by UID via index lookup.
+    fn on_messages_removed(&self, uids: &[u32]) {
+        let imp = self.imp();
+        let store = imp.store.get().expect("store initialized");
+        let mut index = imp.uid_index.borrow_mut();
+
+        // Collect positions to remove (sorted descending to preserve indices)
+        let mut positions: Vec<u32> = uids
+            .iter()
+            .filter_map(|uid| index.remove(uid))
+            .collect();
+        positions.sort_unstable_by(|a, b| b.cmp(a));
+
+        for pos in &positions {
+            store.remove(*pos);
+        }
+
+        // Rebuild index after removals shifted positions
+        if !positions.is_empty() {
+            index.clear();
+            for i in 0..store.n_items() {
+                if let Some(obj) = store.item(i).and_downcast::<MessageObject>() {
+                    index.insert(obj.uid(), i);
+                }
+            }
+        }
+
+        if store.n_items() == 0 {
+            imp.stack.set_visible_child_name("empty");
+        }
+
+        tracing::debug!(removed = uids.len(), total = store.n_items(), "Messages removed");
     }
 }

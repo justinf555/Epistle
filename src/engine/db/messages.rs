@@ -45,21 +45,54 @@ pub struct MessageFields<'a> {
     pub has_attachments: bool,
 }
 
+/// Result of a bulk upsert — which UIDs were inserted, updated, or unchanged.
+#[derive(Debug, Default)]
+pub struct UpsertResult {
+    pub inserted: Vec<u32>,
+    pub updated: Vec<u32>,
+}
+
+impl UpsertResult {
+    pub fn has_changes(&self) -> bool {
+        !self.inserted.is_empty() || !self.updated.is_empty()
+    }
+}
+
 impl Database {
     /// Bulk upsert messages for a folder within a transaction. Skips rows where
-    /// content hasn't changed (via content_hash). Returns `true` if any rows were modified.
+    /// content hasn't changed (via content_hash). Returns which UIDs were
+    /// inserted vs updated (unchanged UIDs are omitted).
     pub async fn bulk_upsert_messages(
         &self,
         account_id: &str,
         folder_name: &str,
         messages: &[MessageFields<'_>],
-    ) -> Result<bool, DbError> {
+    ) -> Result<UpsertResult, DbError> {
         let mut tx = self.pool().begin().await?;
-        let mut changed = false;
+
+        // Snapshot existing UIDs + hashes for this folder
+        let existing: std::collections::HashMap<i64, String> = sqlx::query_as::<_, (i64, String)>(
+            "SELECT uid, content_hash FROM messages
+             WHERE account_id = ? AND folder_name = ? AND content_hash IS NOT NULL",
+        )
+        .bind(account_id)
+        .bind(folder_name)
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .collect();
+
+        let mut result = UpsertResult::default();
 
         for msg in messages {
             let hash = message_content_hash(msg);
-            let result = sqlx::query(
+            let was_existing = existing.contains_key(&(msg.uid as i64));
+            let hash_changed = existing
+                .get(&(msg.uid as i64))
+                .map(|h| h != &hash)
+                .unwrap_or(true);
+
+            let rows = sqlx::query(
                 "INSERT INTO messages (
                     account_id, folder_name, uid, message_id, subject, sender,
                     to_addresses, cc_addresses, date, in_reply_to, reference_ids,
@@ -108,13 +141,17 @@ impl Database {
             .execute(&mut *tx)
             .await?;
 
-            if result.rows_affected() > 0 {
-                changed = true;
+            if rows.rows_affected() > 0 {
+                if was_existing && hash_changed {
+                    result.updated.push(msg.uid);
+                } else if !was_existing {
+                    result.inserted.push(msg.uid);
+                }
             }
         }
 
         tx.commit().await?;
-        Ok(changed)
+        Ok(result)
     }
 
     /// Return all messages for a given folder, ordered by date descending (newest first).
@@ -136,6 +173,38 @@ impl Database {
         .bind(folder_name)
         .fetch_all(self.pool())
         .await?;
+        Ok(rows)
+    }
+
+    /// Return messages for specific UIDs in a folder.
+    pub async fn list_messages_by_uids(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uids: &[u32],
+    ) -> Result<Vec<MessageRow>, DbError> {
+        if uids.is_empty() {
+            return Ok(vec![]);
+        }
+        // Build placeholder list for IN clause
+        let placeholders: Vec<String> = uids.iter().map(|_| "?".to_string()).collect();
+        let sql = format!(
+            "SELECT id, account_id, folder_name, uid, message_id, subject, sender,
+                    to_addresses, cc_addresses, date, in_reply_to, reference_ids,
+                    is_read, is_flagged, is_answered, is_draft,
+                    preview, content_type, has_attachments
+             FROM messages
+             WHERE account_id = ? AND folder_name = ? AND uid IN ({})
+             ORDER BY date DESC, uid DESC",
+            placeholders.join(", ")
+        );
+        let mut query = sqlx::query_as::<_, MessageRow>(&sql)
+            .bind(account_id)
+            .bind(folder_name);
+        for uid in uids {
+            query = query.bind(*uid);
+        }
+        let rows = query.fetch_all(self.pool()).await?;
         Ok(rows)
     }
 }
@@ -223,11 +292,14 @@ mod tests {
             },
         ];
 
-        let changed = db
+        let result = db
             .bulk_upsert_messages("acct1", "INBOX", &messages)
             .await
             .unwrap();
-        assert!(changed);
+        assert_eq!(result.inserted.len(), 2);
+        assert!(result.updated.is_empty());
+        assert!(result.inserted.contains(&1));
+        assert!(result.inserted.contains(&2));
 
         let rows = db.list_messages("acct1", "INBOX").await.unwrap();
         assert_eq!(rows.len(), 2);
@@ -238,11 +310,11 @@ mod tests {
         assert!(!rows[1].is_read);
 
         // Second upsert with same data — no changes
-        let changed = db
+        let result = db
             .bulk_upsert_messages("acct1", "INBOX", &messages)
             .await
             .unwrap();
-        assert!(!changed);
+        assert!(!result.has_changes());
     }
 
     #[tokio::test]

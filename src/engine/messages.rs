@@ -80,28 +80,54 @@ impl MailMessages for MailMessagesImpl {
             "Persisting messages to database"
         );
 
-        let changed = self
+        let result = self
             .db
             .bulk_upsert_messages(account_id, folder_name, &fields)
             .await?;
 
-        if changed {
-            let rows = self.db.list_messages(account_id, folder_name).await?;
-            let result_messages: Vec<Message> = rows.into_iter().map(row_to_message).collect();
+        if !result.inserted.is_empty() {
+            let rows = self
+                .db
+                .list_messages_by_uids(account_id, folder_name, &result.inserted)
+                .await?;
+            let added: Vec<Message> = rows.into_iter().map(row_to_message).collect();
 
             tracing::debug!(
                 account_id,
                 folder_name,
-                count = result_messages.len(),
-                "Data changed, emitting MessagesChanged"
+                count = added.len(),
+                "Emitting MessagesAdded"
             );
 
-            self.sender.send(AppEvent::MessagesChanged {
+            self.sender.send(AppEvent::MessagesAdded {
                 account_id: account_id.to_string(),
                 folder_name: folder_name.to_string(),
-                messages: result_messages,
+                messages: added,
             });
-        } else {
+        }
+
+        if !result.updated.is_empty() {
+            let rows = self
+                .db
+                .list_messages_by_uids(account_id, folder_name, &result.updated)
+                .await?;
+            let updated: Vec<Message> = rows.into_iter().map(row_to_message).collect();
+
+            tracing::debug!(
+                account_id,
+                folder_name,
+                count = updated.len(),
+                "Emitting MessagesUpdated"
+            );
+
+            self.sender.send(AppEvent::MessagesUpdated {
+                account_id: account_id.to_string(),
+                folder_name: folder_name.to_string(),
+                messages: updated,
+            });
+        }
+
+        if !result.has_changes() {
             tracing::debug!(account_id, folder_name, "No message changes detected");
         }
 
