@@ -29,8 +29,17 @@ use config::{GETTEXT_PACKAGE, LOCALEDIR, PKGDATADIR};
 use gettextrs::{bind_textdomain_codeset, bindtextdomain, textdomain};
 use gtk::{gio, glib};
 use gtk::prelude::*;
+use tracing_subscriber::EnvFilter;
 
 fn main() -> glib::ExitCode {
+    // Set up tracing — default to info, override with RUST_LOG=epistle=debug
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("epistle=info")),
+        )
+        .init();
+
     // Set up gettext translations
     bindtextdomain(GETTEXT_PACKAGE, LOCALEDIR).expect("Unable to bind the text domain");
     bind_textdomain_codeset(GETTEXT_PACKAGE, "UTF-8")
@@ -53,6 +62,7 @@ fn main() -> glib::ExitCode {
     let sync = runtime.block_on(epistle::sync::service::SyncEngine::new(
         engine.accounts(),
         engine.folders(),
+        engine.messages(),
     )).expect("Failed to initialize sync engine");
     sync.start();
 

@@ -8,6 +8,7 @@ use thiserror::Error;
 
 pub mod accounts;
 pub mod folders;
+pub mod messages;
 
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -39,6 +40,8 @@ impl Database {
     /// Creates the parent directory if it does not exist, configures WAL mode,
     /// and runs all pending migrations before returning.
     pub async fn open(db_path: &Path) -> Result<Self, DbError> {
+        tracing::info!(path = %db_path.display(), "Opening database");
+
         if let Some(parent) = db_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -54,10 +57,12 @@ impl Database {
             .connect_with(opts)
             .await?;
 
+        tracing::debug!("Running database migrations");
         sqlx::migrate!("src/engine/db/migrations")
             .run(&pool)
             .await?;
 
+        tracing::info!("Database ready");
         Ok(Self { pool })
     }
 

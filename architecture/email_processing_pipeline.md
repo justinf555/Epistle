@@ -1,26 +1,190 @@
 <!-- markdownlint-disable -->
 # Epistle — Email Processing Pipeline
 
-**Version:** 0.1 (Outline)  
-**Status:** To be detailed during Phase 2 implementation  
-**Date:** 2026-04-08  
-**Companion Documents:** `gnome_mail_architecture.md`, `v1_scope.md`
+**Version:** 0.2  
+**Status:** Architecture defined, implementation in progress  
+**Date:** 2026-04-09  
+**Companion Documents:** `gnome_mail_architecture.md`, `v1_scope.md`, `message-pipeline.drawio`
 
 ---
 
 ## Approach
 
-This document will be written alongside implementation. The pipeline is linear (parse → extract → sanitise → render) and the real design decisions are in the sanitisation rules and MIME edge cases, which are best discovered by running real emails through the pipeline.
+The pipeline uses a **visitor pattern** — a sequence of independent processing steps that each inspect the available data and either do their work or silently skip. This means the same pipeline handles both partial messages (headers-only from Phase 1 sync) and full messages (headers + body from Phase 2 background fill), with no branching at the call site.
+
+Real design decisions around sanitisation rules and MIME edge cases will be discovered by running real emails through the pipeline.
 
 ---
 
-## 1. Pipeline Overview
+## 1. Pipeline Architecture
+
+### 1.1 Core Trait
+
+```rust
+/// A single processing step in the email pipeline.
+/// Each step inspects what data is available in RawEmail and
+/// populates the corresponding fields on MailMessage.
+/// Steps MUST be idempotent — re-running with more data fills gaps,
+/// never overwrites valid data.
+trait ProcessingStep: Send + Sync {
+    fn process(&self, message: &mut MailMessage, raw: &RawEmail);
+}
+```
+
+### 1.2 Input: RawEmail
+
+The sync layer produces `RawEmail` — a container for whatever IMAP returned. Fields are all `Option` to represent partial fetches.
+
+```rust
+/// Raw data from IMAP FETCH, before any processing.
+/// All fields are Option — partial fetches leave body/structure as None.
+pub struct RawEmail {
+    pub uid: u32,
+    pub flags: Vec<String>,
+
+    // Phase 1: always present (from ENVELOPE/FETCH)
+    pub envelope: Option<ImapEnvelope>,   // subject, from, to, cc, date, message-id, in-reply-to
+
+    // Phase 1: present if BODYSTRUCTURE was fetched
+    pub body_structure: Option<BodyStructure>,
+
+    // Phase 2: present when body parts are fetched
+    pub raw_headers: Option<Vec<u8>>,     // full RFC 5322 headers
+    pub raw_body: Option<Vec<u8>>,        // full message body (text parts only, not attachments)
+}
+```
+
+### 1.3 Output: MailMessage
+
+The engine's domain type. Partially populated after Phase 1, fully populated after Phase 2.
+
+```rust
+/// Clean, processed email message — the engine's domain type.
+/// Fields populated incrementally as more data becomes available.
+pub struct MailMessage {
+    // Identity (always set)
+    pub uid: u32,
+    pub account_id: String,
+    pub folder_name: String,
+
+    // Metadata (Phase 1 — from envelope)
+    pub message_id: Option<String>,
+    pub subject: Option<String>,
+    pub from: Option<String>,           // decoded display name + address
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub date: Option<chrono::DateTime<chrono::Utc>>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+
+    // Flags (Phase 1 — always present)
+    pub is_read: bool,
+    pub is_flagged: bool,
+    pub is_answered: bool,
+    pub is_draft: bool,
+
+    // Body-dependent (Phase 2 — None until body is fetched)
+    pub preview: Option<String>,         // first ~200 chars of text body
+    pub content_type: Option<String>,    // "text/plain", "text/html", "multipart/alternative"
+    pub has_attachments: bool,
+
+    // Attachment metadata (from BODYSTRUCTURE or body parsing)
+    pub attachments: Vec<AttachmentMeta>,
+
+    // Threading (populated by threading module after pipeline)
+    pub thread_id: Option<String>,
+}
+
+pub struct AttachmentMeta {
+    pub filename: Option<String>,
+    pub mime_type: String,
+    pub size: u64,
+    pub content_disposition: String,     // "attachment" or "inline"
+}
+```
+
+### 1.4 Processing Steps (Visitors)
+
+Steps run in order. Each step checks whether its required data is present in `RawEmail` and either processes or returns immediately.
+
+| Step | Required Data | Phase | Behaviour |
+|---|---|---|---|
+| `ExtractMetadata` | `envelope` | 1 | Decodes MIME-encoded subject, parses addresses, normalises date. Always succeeds — envelope is always present. |
+| `ExtractFlags` | `flags` | 1 | Maps IMAP flag strings (`\Seen`, `\Flagged`, etc.) to boolean fields. Always succeeds. |
+| `ExtractBodyStructure` | `body_structure` | 1 | Populates `has_attachments` and `attachments` metadata from BODYSTRUCTURE. No-op if not fetched. |
+| `ExtractPreview` | `raw_body` | 2 | Parses body, extracts first ~200 chars of text content. No-op if body not yet fetched. |
+| `DetectContentType` | `raw_body` | 2 | Determines whether message is plain text, HTML, or multipart. No-op if body not yet fetched. |
+
+> **Note:** HTML sanitisation (`ammonia`) is **not** a pipeline step. It is a rendering concern handled in the UI layer when displaying the email in a WebKitWebView. The pipeline stores the raw body as-is.
+
+### 1.5 Pipeline Execution
+
+```rust
+pub struct EmailPipeline {
+    steps: Vec<Box<dyn ProcessingStep>>,
+}
+
+impl EmailPipeline {
+    pub fn new() -> Self {
+        Self {
+            steps: vec![
+                Box::new(ExtractMetadata),
+                Box::new(ExtractFlags),
+                Box::new(ExtractBodyStructure),
+                Box::new(ExtractPreview),
+                Box::new(DetectContentType),
+            ],
+        }
+    }
+
+    /// Run all steps. Each step inspects available data and skips if needed.
+    pub fn process(&self, message: &mut MailMessage, raw: &RawEmail) {
+        for step in &self.steps {
+            step.process(message, raw);
+        }
+    }
+}
+```
+
+### 1.6 Two-Phase Flow
 
 ```
-Raw MIME (.eml) → mail-parser → MIME tree → Extract HTML/plain → ammonia sanitise → WebKitWebView
-                                          → Extract plain text → FTS5 index + preview text
-                                          → Extract attachments → metadata to SQLite, files to disk
+Phase 1 (initial sync — fast, headers only):
+  IMAP FETCH (ENVELOPE FLAGS UID BODYSTRUCTURE)
+      → RawEmail { envelope: Some, flags: [...], body_structure: Some, raw_body: None }
+      → Pipeline runs → ExtractMetadata ✓, ExtractFlags ✓, ExtractBodyStructure ✓,
+                         ExtractPreview (skip), DetectContentType (skip)
+      → MailMessage with metadata + flags + attachment list (no preview/body)
+      → Persist to DB, emit MessagesChanged
+
+Phase 2 (background fill — slower, body content):
+  IMAP FETCH (BODY[TEXT] for text parts, batches of 50-100)
+      → RawEmail { ..., raw_body: Some }
+      → Pipeline runs → all steps execute, body-dependent steps now fill in their fields
+      → MailMessage with preview, content type, sanitised HTML
+      → Merge into DB (update, don't overwrite), emit MessagesChanged
 ```
+
+### 1.7 Pipeline Naming
+
+Two pipelines share the same visitor pattern (`ProcessingStep` trait), but serve different purposes:
+
+| Pipeline | When | Responsibility | Location |
+|---|---|---|---|
+| **EmailProcessingPipeline** | Sync time | Raw IMAP → clean `MailMessage` for storage | `engine/pipeline.rs` |
+| **EmailViewPipeline** | Render time | Stored content → safe displayable output (HTML sanitisation, CID image resolution, etc.) | `ui/` (TBD) |
+
+The processing pipeline stores raw body content as-is. The view pipeline transforms it for display. This separation means re-rendering with updated sanitisation rules never requires re-syncing.
+
+### 1.8 Design Principles
+
+- **One code path**: no `if partial { ... } else { ... }` at the call site
+- **Additive**: new steps (e.g. `DetectCalendarInvite`) are just another visitor
+- **Idempotent**: re-running with more data fills gaps, never corrupts existing fields
+- **Testable**: each step is a pure function from (MailMessage, RawEmail) → MailMessage
+- **No I/O**: the pipeline itself does no network or database work
+
+---
 
 ## 2. MIME Parsing
 
@@ -192,4 +356,4 @@ Same extraction-ready pattern as the `goa/` module. No Epistle-specific imports 
 
 ---
 
-_This document is a living spec. Sections 2–6, 8, and 9 will be detailed during Phase 2 implementation. Section 7 (threading) is specified above and will be implemented during Phase 1 alongside the sync engine, since thread assignment happens at message insert time._
+_This document is a living spec. Section 1 (pipeline architecture) defines the visitor pattern and two-phase sync strategy. Sections 2–6, 8, and 9 will be detailed during implementation. Section 7 (threading) is specified above and will be implemented alongside the sync engine, since thread assignment happens at message insert time._

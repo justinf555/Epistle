@@ -73,7 +73,7 @@ impl GoaClient {
                 Ok(None) => {} // filtered out (disabled or no IMAP)
                 Err(e) => {
                     // Log and skip individual account failures
-                    eprintln!("warning: skipping GOA account at {path}: {e}");
+                    tracing::warn!(path = %path, error = %e, "Skipping GOA account");
                 }
             }
         }

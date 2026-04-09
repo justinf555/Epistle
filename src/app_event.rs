@@ -1,5 +1,6 @@
 use crate::engine::traits::accounts::Account;
 use crate::engine::traits::folders::Folder;
+use crate::engine::traits::messages::Message;
 
 /// Application-layer event type.
 ///
@@ -21,5 +22,12 @@ pub enum AppEvent {
         account_id: String,
         email_address: String,
         folders: Vec<Folder>,
+    },
+
+    /// Message sync completed for one folder.
+    MessagesChanged {
+        account_id: String,
+        folder_name: String,
+        messages: Vec<Message>,
     },
 }

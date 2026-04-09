@@ -1,0 +1,23 @@
+CREATE TABLE messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id      TEXT NOT NULL REFERENCES accounts(goa_id),
+    folder_name     TEXT NOT NULL,
+    uid             INTEGER NOT NULL,
+    message_id      TEXT,
+    subject         TEXT,
+    sender          TEXT,
+    to_addresses    TEXT,
+    cc_addresses    TEXT,
+    date            TEXT,
+    in_reply_to     TEXT,
+    reference_ids   TEXT,
+    is_read         INTEGER NOT NULL DEFAULT 0,
+    is_flagged      INTEGER NOT NULL DEFAULT 0,
+    is_answered     INTEGER NOT NULL DEFAULT 0,
+    is_draft        INTEGER NOT NULL DEFAULT 0,
+    preview         TEXT,
+    content_type    TEXT,
+    has_attachments INTEGER NOT NULL DEFAULT 0,
+    content_hash    TEXT,
+    UNIQUE(account_id, folder_name, uid)
+);

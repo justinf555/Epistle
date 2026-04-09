@@ -1,0 +1,40 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Page-1" id="msg-pipeline-001">
+    <mxGraphModel dx="1161" dy="911" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;align=left;verticalAlign=top;resizable=0;points=[];fontSize=14;fontStyle=1;" value="Message Sync &amp; Processing Pipeline" vertex="1">
+          <mxGeometry height="30" width="350" x="60" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="legend" parent="1" style="text;html=1;align=left;verticalAlign=top;resizable=0;points=[];fontSize=9;fontColor=#333;" value="&lt;b&gt;Flow:&lt;/b&gt;&lt;br&gt;① IMAP FETCH envelope+flags from inbox&lt;br&gt;② Raw ImapMessage structs returned&lt;br&gt;③ Pipeline parses/decodes raw fields&lt;br&gt;④ Clean domain Message types produced&lt;br&gt;⑤ Bulk upsert with content hash&lt;br&gt;⑥ MessagesChanged event if data changed" vertex="1">
+          <mxGeometry height="100" width="260" x="70" y="790" as="geometry" />
+        </mxCell>
+        <mxCell id="X5idoTHupHPgBBI-_4Bn-9" edge="1" parent="1" source="X5idoTHupHPgBBI-_4Bn-6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="X5idoTHupHPgBBI-_4Bn-8" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="X5idoTHupHPgBBI-_4Bn-6" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="&lt;div&gt;Message&amp;nbsp;&lt;/div&gt;&lt;div&gt;Received&lt;/div&gt;" vertex="1">
+          <mxGeometry height="60" width="120" x="340" y="110" as="geometry" />
+        </mxCell>
+        <mxCell id="X5idoTHupHPgBBI-_4Bn-11" edge="1" parent="1" source="X5idoTHupHPgBBI-_4Bn-8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="X5idoTHupHPgBBI-_4Bn-10" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="X5idoTHupHPgBBI-_4Bn-8" parent="1" style="whiteSpace=wrap;html=1;rounded=1;" value="Email Processing Pipline" vertex="1">
+          <mxGeometry height="60" width="120" x="340" y="300" as="geometry" />
+        </mxCell>
+        <mxCell id="X5idoTHupHPgBBI-_4Bn-10" parent="1" style="whiteSpace=wrap;html=1;rounded=1;" value="Engine" vertex="1">
+          <mxGeometry height="60" width="120" x="340" y="490" as="geometry" />
+        </mxCell>
+        <mxCell id="X5idoTHupHPgBBI-_4Bn-12" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="&lt;div&gt;Clean / Etc&lt;/div&gt;&lt;div&gt;Extract Metadata&lt;/div&gt;&lt;div&gt;Extract Attachments&lt;/div&gt;&lt;div&gt;Extract Preview&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="170" x="480" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="X5idoTHupHPgBBI-_4Bn-13" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="RAW Email Message" vertex="1">
+          <mxGeometry height="30" width="150" x="410" y="210" as="geometry" />
+        </mxCell>
+        <mxCell id="X5idoTHupHPgBBI-_4Bn-14" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;rounded=0;" value="Engine MailMessage" vertex="1">
+          <mxGeometry height="30" width="150" x="420" y="400" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
