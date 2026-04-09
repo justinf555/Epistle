@@ -5,9 +5,11 @@ use async_trait::async_trait;
 /// A processed email message as known to Epistle.
 ///
 /// Fields are populated incrementally: Phase 1 (headers/flags) fills metadata,
-/// Phase 2 (body fetch) fills preview and content type.
+/// Phase 2 (body fetch) writes the .eml file to disk.
 #[derive(Debug, Clone)]
 pub struct Message {
+    /// Internal stable identifier (UUID v4).
+    pub uuid: String,
     /// IMAP UID within the folder.
     pub uid: u32,
     /// Account this message belongs to.
@@ -48,15 +50,9 @@ pub struct Message {
     pub content_type: Option<String>,
     /// Whether the message has attachments (from BODYSTRUCTURE or body).
     pub has_attachments: bool,
-
-    // ── Body content (fetched on demand, cached in DB) ──────────────────
-    /// Plain text body part.
-    pub body_text: Option<String>,
-    /// HTML body part.
-    pub body_html: Option<String>,
 }
 
-/// Extracted body content from a message.
+/// Extracted body content from a message (parsed from .eml at render time).
 #[derive(Debug, Clone)]
 pub struct MessageBody {
     pub body_text: Option<String>,
@@ -96,21 +92,18 @@ pub trait MailMessages: Send + Sync {
         offset: u32,
     ) -> anyhow::Result<Vec<Message>>;
 
-    /// Cache the body content for a message after it's been fetched and parsed.
-    async fn cache_body(
+    /// Get all UIDs for a folder (for differential sync).
+    async fn list_local_uids(
         &self,
         account_id: &str,
         folder_name: &str,
-        uid: u32,
-        body_text: Option<&str>,
-        body_html: Option<&str>,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<std::collections::HashSet<u32>>;
 
-    /// Get cached body for a message. Returns None if not yet fetched.
-    async fn get_body(
+    /// Remove messages by UID. Emits MessagesRemoved.
+    async fn delete_messages_by_uids(
         &self,
         account_id: &str,
         folder_name: &str,
-        uid: u32,
-    ) -> anyhow::Result<Option<MessageBody>>;
+        uids: &[u32],
+    ) -> anyhow::Result<u64>;
 }

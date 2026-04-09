@@ -1,9 +1,11 @@
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 
 use crate::app_event::AppEvent;
 use crate::engine::db::messages::MessageFields;
 use crate::engine::db::Database;
-use crate::engine::traits::messages::{MailMessages, Message, MessageBody};
+use crate::engine::traits::messages::{MailMessages, Message};
 use crate::event_bus::EventSender;
 
 /// Concrete implementation of [`MailMessages`] backed by SQLite + EventSender.
@@ -54,6 +56,7 @@ impl MailMessages for MailMessagesImpl {
         let fields: Vec<MessageFields<'_>> = joined
             .iter()
             .map(|(m, to_joined, cc_joined, refs_joined)| MessageFields {
+                uuid: &m.uuid,
                 uid: m.uid,
                 message_id: m.message_id.as_deref(),
                 subject: m.subject.as_deref(),
@@ -158,39 +161,47 @@ impl MailMessages for MailMessagesImpl {
         Ok(rows.into_iter().map(row_to_message).collect())
     }
 
-    async fn cache_body(
+    async fn list_local_uids(
         &self,
         account_id: &str,
         folder_name: &str,
-        uid: u32,
-        body_text: Option<&str>,
-        body_html: Option<&str>,
-    ) -> anyhow::Result<()> {
-        self.db
-            .update_message_body(account_id, folder_name, uid, body_text, body_html)
-            .await?;
-        Ok(())
+    ) -> anyhow::Result<HashSet<u32>> {
+        Ok(self.db.list_local_uids(account_id, folder_name).await?)
     }
 
-    async fn get_body(
+    async fn delete_messages_by_uids(
         &self,
         account_id: &str,
         folder_name: &str,
-        uid: u32,
-    ) -> anyhow::Result<Option<MessageBody>> {
-        let row = self
+        uids: &[u32],
+    ) -> anyhow::Result<u64> {
+        let deleted = self
             .db
-            .get_message_body(account_id, folder_name, uid)
+            .bulk_delete_by_uids(account_id, folder_name, uids)
             .await?;
-        Ok(row.map(|(text, html)| MessageBody {
-            body_text: text,
-            body_html: html,
-        }))
+
+        if deleted > 0 {
+            tracing::debug!(
+                account_id,
+                folder_name,
+                count = deleted,
+                "Emitting MessagesRemoved"
+            );
+
+            self.sender.send(AppEvent::MessagesRemoved {
+                account_id: account_id.to_string(),
+                folder_name: folder_name.to_string(),
+                uids: uids.to_vec(),
+            });
+        }
+
+        Ok(deleted)
     }
 }
 
 fn row_to_message(row: crate::engine::db::messages::MessageRow) -> Message {
     Message {
+        uuid: row.uuid,
         uid: row.uid as u32,
         account_id: row.account_id,
         folder_name: row.folder_name,
@@ -219,7 +230,5 @@ fn row_to_message(row: crate::engine::db::messages::MessageRow) -> Message {
         preview: row.preview,
         content_type: row.content_type,
         has_attachments: row.has_attachments,
-        body_text: row.body_text,
-        body_html: row.body_html,
     }
 }

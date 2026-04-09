@@ -98,7 +98,7 @@ impl SyncEngine {
                     let folder_name = folder_name.clone();
                     let uid = *uid;
                     tokio::spawn(async move {
-                        if let Err(e) = engine.fetch_and_cache_body(&account_id, &folder_name, uid).await {
+                        if let Err(e) = engine.fetch_and_emit_body(&account_id, &folder_name, uid).await {
                             error!(
                                 account_id = %account_id,
                                 folder_name = %folder_name,
@@ -310,6 +310,7 @@ impl SyncEngine {
                                     .iter()
                                     .map(|raw| {
                                         let mut msg = Message {
+                                            uuid: uuid::Uuid::new_v4().to_string(),
                                             uid: raw.uid,
                                             account_id: account.goa_id.clone(),
                                             folder_name: folder.name.clone(),
@@ -329,8 +330,6 @@ impl SyncEngine {
                                             content_type: None,
                                             has_attachments: false,
                                             internal_date: None,
-                                            body_text: None,
-                                            body_html: None,
                                         };
                                         pipeline.process(&mut msg, raw);
                                         msg
@@ -376,28 +375,14 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// Fetch a single message body from IMAP, parse MIME, cache in DB, emit event.
-    async fn fetch_and_cache_body(
+    /// Fetch a single message body from IMAP, parse MIME, and emit event.
+    async fn fetch_and_emit_body(
         &self,
         account_id: &str,
         folder_name: &str,
         uid: u32,
     ) -> anyhow::Result<()> {
         debug!(account_id, folder_name, uid, "Fetching message body");
-
-        // Check DB cache first
-        if let Some(body) = self.messages.get_body(account_id, folder_name, uid).await? {
-            if body.body_text.is_some() || body.body_html.is_some() {
-                debug!(uid, "Body already cached, emitting from cache");
-                self.sender.send(AppEvent::MessageBodyFetched {
-                    account_id: account_id.to_string(),
-                    folder_name: folder_name.to_string(),
-                    uid,
-                    body,
-                });
-                return Ok(());
-            }
-        }
 
         // Get IMAP config from cache (populated during initial sync)
         let config = {
@@ -407,7 +392,6 @@ impl SyncEngine {
         let config = match config {
             Some(c) => c,
             None => {
-                // Cache miss — re-discover from GOA (e.g. new account added)
                 warn!(account_id, "IMAP config not cached, re-discovering from GOA");
                 let c = {
                     let mut goa = self.goa.lock().await;
@@ -417,7 +401,6 @@ impl SyncEngine {
                         .find(|a| a.goa_id == account_id)
                         .map(|a| a.imap_config.clone())
                         .ok_or_else(|| anyhow::anyhow!("Account {account_id} not found in GOA"))?
-                    // goa guard dropped here
                 };
                 self.imap_configs.write().await.insert(account_id.to_string(), c.clone());
                 c
@@ -456,22 +439,11 @@ impl SyncEngine {
         // Parse MIME
         let body = parse_mime_body(&raw_bytes);
 
-        // Cache in DB
-        self.messages
-            .cache_body(
-                account_id,
-                folder_name,
-                uid,
-                body.body_text.as_deref(),
-                body.body_html.as_deref(),
-            )
-            .await?;
-
         debug!(
             uid,
             has_html = body.body_html.is_some(),
             has_text = body.body_text.is_some(),
-            "Body fetched and cached"
+            "Body fetched"
         );
 
         // Emit event

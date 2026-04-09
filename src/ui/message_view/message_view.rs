@@ -1,5 +1,4 @@
 use std::cell::{Cell, RefCell};
-use std::sync::Arc;
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -8,7 +7,7 @@ use webkit6::prelude::*;
 
 use epistle::app_event::AppEvent;
 use epistle::engine::pipeline::sanitise;
-use epistle::engine::traits::messages::{MailMessages, MessageBody};
+use epistle::engine::traits::messages::MessageBody;
 use epistle::event_bus::EventSender;
 
 mod imp {
@@ -22,7 +21,6 @@ mod imp {
         #[template_child]
         pub(super) content_box: TemplateChild<gtk::Box>,
 
-        pub(super) messages: std::cell::OnceCell<Arc<dyn MailMessages>>,
         pub(super) sender: std::cell::OnceCell<EventSender>,
         pub(super) webview: RefCell<Option<webkit6::WebView>>,
         pub(super) current_uid: Cell<u32>,
@@ -97,13 +95,8 @@ impl EpistleMessageView {
         glib::Object::builder().build()
     }
 
-    /// Inject engine trait objects. Must be called before the widget is rooted.
-    pub fn set_engine(&self, messages: Arc<dyn MailMessages>, sender: EventSender) {
-        self.imp()
-            .messages
-            .set(messages)
-            .ok()
-            .expect("messages set once");
+    /// Inject event sender. Must be called before the widget is rooted.
+    pub fn set_engine(&self, sender: EventSender) {
         self.imp()
             .sender
             .set(sender)
@@ -152,48 +145,18 @@ impl EpistleMessageView {
     }
 
     fn load_body(&self, account_id: &str, folder_name: &str, uid: u32) {
-        let messages = Arc::clone(
-            self.imp()
-                .messages
-                .get()
-                .expect("engine set before use"),
-        );
         let sender = self
             .imp()
             .sender
             .get()
             .expect("sender set before use")
             .clone();
-        let account_id = account_id.to_string();
-        let folder_name = folder_name.to_string();
 
-        let weak = self.downgrade();
-        glib::MainContext::default().spawn_local(async move {
-            let Some(view) = weak.upgrade() else {
-                return;
-            };
-
-            // Check if user has already navigated away
-            if view.imp().current_uid.get() != uid {
-                return;
-            }
-
-            // Check DB cache
-            if let Ok(Some(body)) = messages.get_body(&account_id, &folder_name, uid).await {
-                if body.body_text.is_some() || body.body_html.is_some() {
-                    tracing::debug!(uid, "Body loaded from cache");
-                    view.render_body(&body);
-                    return;
-                }
-            }
-
-            // Cache miss — request body fetch from SyncEngine
-            tracing::debug!(uid, "Body not cached, requesting fetch");
-            sender.send(AppEvent::MessageBodyRequested {
-                account_id,
-                folder_name,
-                uid,
-            });
+        tracing::debug!(uid, "Requesting body fetch");
+        sender.send(AppEvent::MessageBodyRequested {
+            account_id: account_id.to_string(),
+            folder_name: folder_name.to_string(),
+            uid,
         });
     }
 
