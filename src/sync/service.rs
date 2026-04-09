@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
 
+use tokio::sync::mpsc;
+
 use crate::app_event::AppEvent;
 use crate::engine::body_store::BodyStore;
-use crate::engine::pipeline::parse_body::parse_mime_body;
 use crate::engine::pipeline::EmailPipeline;
 use crate::engine::traits::accounts::{Account, MailAccounts};
 use crate::engine::traits::folders::{Folder, MailFolders};
@@ -13,6 +14,7 @@ use crate::engine::traits::messages::{MailMessages, Message};
 use crate::event_bus::EventSender;
 use crate::goa::types::{GoaMailAccount, ImapConfig, TlsMode};
 use crate::goa::GoaClient;
+use crate::sync::body_worker::{BodyWorker, FetchBodyRequest};
 use crate::sync::imap::ImapFolder;
 use crate::sync::pool::{max_connections_for_provider, SyncTaskPool};
 
@@ -33,14 +35,19 @@ pub struct SyncEngine {
     accounts: Arc<dyn MailAccounts>,
     folders: Arc<dyn MailFolders>,
     messages: Arc<dyn MailMessages>,
-    body_store: Arc<BodyStore>,
+    #[allow(dead_code)] // Used for IDLE notifications and sync progress events
     sender: EventSender,
     pipeline: EmailPipeline,
     running: std::sync::atomic::AtomicBool,
-    /// Cached IMAP configs keyed by GOA account ID, populated after initial sync.
-    imap_configs: tokio::sync::RwLock<HashMap<String, ImapConfig>>,
-    /// Cached provider types keyed by GOA account ID, for connection limit lookup.
-    provider_types: tokio::sync::RwLock<HashMap<String, String>>,
+    /// Cached IMAP configs — shared with BodyWorker.
+    imap_configs: Arc<tokio::sync::RwLock<HashMap<String, ImapConfig>>>,
+    /// Cached provider types — shared with BodyWorker.
+    provider_types: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    /// Priority body fetch channel (user-initiated).
+    body_priority_tx: mpsc::Sender<FetchBodyRequest>,
+    /// Background body fetch channel (header worker prefetch).
+    #[allow(dead_code)] // Used when prefetch is wired in Phase 5
+    body_background_tx: mpsc::Sender<FetchBodyRequest>,
 }
 
 impl SyncEngine {
@@ -54,18 +61,38 @@ impl SyncEngine {
     ) -> anyhow::Result<Arc<Self>> {
         let goa = Arc::new(tokio::sync::Mutex::new(GoaClient::new().await?));
         let pool = Arc::new(SyncTaskPool::new(Arc::clone(&goa)));
+
+        let imap_configs = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let provider_types = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+
+        let (body_priority_tx, body_priority_rx) = mpsc::channel::<FetchBodyRequest>(32);
+        let (body_background_tx, body_background_rx) = mpsc::channel::<FetchBodyRequest>(512);
+
+        // Spawn the body worker
+        let mut worker = BodyWorker::new(
+            body_priority_rx,
+            body_background_rx,
+            Arc::clone(&pool),
+            Arc::clone(&body_store),
+            sender.clone(),
+            Arc::clone(&imap_configs),
+            Arc::clone(&provider_types),
+        );
+        tokio::spawn(async move { worker.run().await });
+
         Ok(Arc::new(Self {
             goa,
             pool,
             accounts,
             folders,
             messages,
-            body_store,
             sender,
             pipeline: EmailPipeline::new(),
             running: std::sync::atomic::AtomicBool::new(false),
-            imap_configs: tokio::sync::RwLock::new(HashMap::new()),
-            provider_types: tokio::sync::RwLock::new(HashMap::new()),
+            imap_configs,
+            provider_types,
+            body_priority_tx,
+            body_background_tx,
         }))
     }
 
@@ -102,14 +129,25 @@ impl SyncEngine {
                     let folder_name = folder_name.clone();
                     let uid = *uid;
                     tokio::spawn(async move {
-                        if let Err(e) = engine.fetch_and_emit_body(&account_id, &folder_name, uid).await {
-                            error!(
-                                account_id = %account_id,
-                                folder_name = %folder_name,
-                                uid,
-                                error = %e,
-                                "Body fetch failed"
-                            );
+                        // Look up UUID for this message
+                        let uuid = match engine.messages.get_uuid(&account_id, &folder_name, uid).await {
+                            Ok(Some(u)) => u,
+                            Ok(None) => {
+                                warn!(uid, "No UUID found for body request");
+                                return;
+                            }
+                            Err(e) => {
+                                error!(uid, error = %e, "UUID lookup failed");
+                                return;
+                            }
+                        };
+                        if let Err(e) = engine.body_priority_tx.send(FetchBodyRequest {
+                            uid,
+                            uuid,
+                            account_id,
+                            folder_name,
+                        }).await {
+                            error!(error = %e, "Failed to send priority body request");
                         }
                     });
                 }
@@ -442,116 +480,6 @@ impl SyncEngine {
         Ok(())
     }
 
-    /// Fetch a single message body from IMAP, store as .eml, parse, and emit event.
-    async fn fetch_and_emit_body(
-        &self,
-        account_id: &str,
-        folder_name: &str,
-        uid: u32,
-    ) -> anyhow::Result<()> {
-        debug!(account_id, folder_name, uid, "Fetching message body");
-
-        // Look up the UUID for this message
-        let uuid = self.messages.get_uuid(account_id, folder_name, uid).await?;
-        let uuid = match uuid {
-            Some(u) => u,
-            None => {
-                warn!(uid, "No UUID found for message — cannot store body");
-                return Ok(());
-            }
-        };
-
-        // Check if .eml already exists on disk
-        if self.body_store.has_eml(account_id, &uuid).await {
-            debug!(uid, uuid = %uuid, "Body already on disk, parsing from file");
-            if let Some(raw) = self.body_store.read_eml(account_id, &uuid).await? {
-                let body = parse_mime_body(&raw);
-                self.sender.send(AppEvent::MessageBodyFetched {
-                    account_id: account_id.to_string(),
-                    folder_name: folder_name.to_string(),
-                    uid,
-                    body,
-                });
-                return Ok(());
-            }
-        }
-
-        // Get IMAP config from cache
-        let config = {
-            let configs = self.imap_configs.read().await;
-            configs.get(account_id).cloned()
-        };
-        let config = match config {
-            Some(c) => c,
-            None => {
-                warn!(account_id, "IMAP config not cached, re-discovering from GOA");
-                let c = {
-                    let mut goa = self.goa.lock().await;
-                    let goa_accounts = goa.discover_accounts().await?;
-                    goa_accounts
-                        .iter()
-                        .find(|a| a.goa_id == account_id)
-                        .map(|a| a.imap_config.clone())
-                        .ok_or_else(|| anyhow::anyhow!("Account {account_id} not found in GOA"))?
-                };
-                self.imap_configs.write().await.insert(account_id.to_string(), c.clone());
-                c
-            }
-        };
-
-        let max_conns = {
-            let providers = self.provider_types.read().await;
-            providers
-                .get(account_id)
-                .map(|p| max_connections_for_provider(p))
-                .unwrap_or(10)
-        };
-
-        // Acquire pooled connection and fetch body
-        let mut guard = self.pool.acquire(account_id, &config, max_conns).await?;
-        let session = guard.session();
-
-        session.select(folder_name).await?;
-
-        let uid_str = uid.to_string();
-        let fetches = session.uid_fetch(&uid_str, "BODY[]").await;
-        let fetches = match fetches {
-            Ok(f) => f,
-            Err(e) => {
-                guard.poison();
-                return Err(e.into());
-            }
-        };
-
-        let raw_bytes = fetches
-            .iter()
-            .find_map(|f| f.body().map(|b| b.to_vec()))
-            .ok_or_else(|| crate::sync::imap::ImapError::MessageNotFound { uid })?;
-
-        // Store .eml to filesystem
-        self.body_store.store_eml(account_id, &uuid, &raw_bytes).await
-            .map_err(|e| anyhow::anyhow!("Failed to store .eml: {e}"))?;
-
-        // Parse MIME and emit event
-        let body = parse_mime_body(&raw_bytes);
-
-        debug!(
-            uid,
-            uuid = %uuid,
-            has_html = body.body_html.is_some(),
-            has_text = body.body_text.is_some(),
-            "Body fetched and stored"
-        );
-
-        self.sender.send(AppEvent::MessageBodyFetched {
-            account_id: account_id.to_string(),
-            folder_name: folder_name.to_string(),
-            uid,
-            body,
-        });
-
-        Ok(())
-    }
 }
 
 // ── Protocol → Domain conversions ───────────────────────────────────────────
