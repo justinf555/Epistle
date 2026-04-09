@@ -464,6 +464,12 @@ impl EpistleMessageList {
                 if store.n_items() > 0 {
                     self.imp().stack.set_visible_child_name("list");
                 }
+
+                // Auto-scroll to top if user is already near the top
+                let vadj = self.imp().scrolled_window.vadjustment();
+                if vadj.value() < 50.0 {
+                    vadj.set_value(0.0);
+                }
             }
         }
     }
