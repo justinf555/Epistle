@@ -5,6 +5,7 @@ use tokio_native_tls::TlsConnector;
 
 use crate::engine::pipeline::{RawAddress, RawEmail};
 use crate::goa::types::{AuthMethod, ImapConfig, TlsMode};
+use crate::sync::pool::ImapSession;
 
 use thiserror::Error;
 use tokio_native_tls::native_tls;
@@ -25,6 +26,60 @@ pub enum ImapError {
 
     #[error("message not found: UID {uid}")]
     MessageNotFound { uid: u32 },
+}
+
+impl ImapError {
+    /// Whether this error indicates an authentication failure.
+    pub fn is_auth_error(&self) -> bool {
+        matches!(self, Self::Auth(_))
+    }
+}
+
+/// Connect to an IMAP server and authenticate, returning a type-erased session.
+///
+/// Handles all three TLS modes (implicit, STARTTLS, plain).
+pub async fn connect(config: &ImapConfig, auth: &AuthMethod) -> Result<ImapSession, ImapError> {
+    match config.tls_mode {
+        TlsMode::Implicit => {
+            let tcp = TcpStream::connect((&*config.host, config.port)).await?;
+            let tls = tls_connector(config)?;
+            let tls_stream = tls.connect(&config.host, tcp).await.map_err(|e| {
+                ImapError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))
+            })?;
+            let mut client = async_imap::Client::new(tls_stream);
+            client.read_response().await.transpose()?;
+            let session = authenticate(client, auth).await?;
+            Ok(ImapSession::Tls(session))
+        }
+        TlsMode::StartTls => {
+            let tcp = TcpStream::connect((&*config.host, config.port)).await?;
+            let mut client = async_imap::Client::new(tcp);
+            client.read_response().await.transpose()?;
+            client
+                .run_command_and_check_ok("STARTTLS", None)
+                .await
+                .map_err(async_imap::error::Error::from)?;
+            let inner = client.into_inner();
+            let tls = tls_connector(config)?;
+            let tls_stream = tls.connect(&config.host, inner).await.map_err(|e| {
+                ImapError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))
+            })?;
+            let client = async_imap::Client::new(tls_stream);
+            let session = authenticate(client, auth).await?;
+            Ok(ImapSession::Tls(session))
+        }
+        TlsMode::None => {
+            tracing::warn!(
+                host = %config.host,
+                "Connecting to IMAP without TLS — credentials will be sent in plaintext"
+            );
+            let tcp = TcpStream::connect((&*config.host, config.port)).await?;
+            let mut client = async_imap::Client::new(tcp);
+            client.read_response().await.transpose()?;
+            let session = authenticate(client, auth).await?;
+            Ok(ImapSession::Plain(session))
+        }
+    }
 }
 
 /// A folder discovered from IMAP LIST.

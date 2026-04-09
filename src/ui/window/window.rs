@@ -10,7 +10,6 @@ use epistle::engine::traits::messages::MailMessages;
 use epistle::event_bus::EventSender;
 
 use crate::ui::message_list::EpistleMessageList;
-use crate::ui::message_list::MessageObject;
 use crate::ui::message_view::EpistleMessageView;
 use crate::ui::sidebar::EpistleSidebar;
 
@@ -95,13 +94,13 @@ impl EpistleWindow {
 
         // Sidebar — inject and parent into outer split
         let sidebar = EpistleSidebar::new();
-        sidebar.set_engine(accounts, folders);
+        sidebar.set_engine(accounts, folders, sender.clone());
         self.imp().outer_split.set_sidebar(Some(&sidebar));
         self.imp().sidebar.set(sidebar).expect("sidebar set once");
 
         // Message list — inject and parent into inner split sidebar
         let message_list = EpistleMessageList::new();
-        message_list.set_engine(accounts_for_messages, messages);
+        message_list.set_engine(accounts_for_messages, messages, sender.clone());
 
         // Wire sidebar toggle to outer split
         self.setup_sidebar_toggle(message_list.sidebar_toggle());
@@ -113,9 +112,6 @@ impl EpistleWindow {
         message_view.set_engine(messages_for_view, sender);
 
         self.imp().inner_split.set_content(Some(&message_view));
-
-        // Wire selection: message list → message view
-        self.setup_selection(&message_list, &message_view);
 
         self.imp()
             .message_list
@@ -140,24 +136,4 @@ impl EpistleWindow {
         });
     }
 
-    fn setup_selection(
-        &self,
-        message_list: &EpistleMessageList,
-        message_view: &EpistleMessageView,
-    ) {
-        let selection = message_list.selection_model().clone();
-        let view = message_view.clone();
-        selection.connect_selection_changed(move |sel, _, _| {
-            if let Some(item) = sel.selected_item().and_downcast::<MessageObject>() {
-                view.show_message(
-                    &item.account_id().unwrap_or_default(),
-                    &item.folder_name().unwrap_or_default(),
-                    item.uid(),
-                    item.subject().as_deref(),
-                    item.sender().as_deref(),
-                    item.date().as_deref(),
-                );
-            }
-        });
-    }
 }

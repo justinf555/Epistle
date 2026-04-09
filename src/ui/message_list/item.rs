@@ -79,6 +79,7 @@ impl MessageObject {
         self.set_sender(msg.sender.clone());
         self.set_subject(msg.subject.clone());
         self.set_date(msg.date.clone());
+        self.set_internal_date(msg.internal_date.clone());
         self.set_preview(msg.preview.clone());
         self.set_is_read(msg.is_read);
         self.set_is_flagged(msg.is_flagged);

@@ -59,4 +59,20 @@ pub enum AppEvent {
         uid: u32,
         body: MessageBody,
     },
+
+    /// User selected a folder in the sidebar.
+    FolderSelected {
+        account_id: String,
+        folder_name: String,
+    },
+
+    /// User selected a message in the message list.
+    MessageSelected {
+        account_id: String,
+        folder_name: String,
+        uid: u32,
+        subject: Option<String>,
+        sender: Option<String>,
+        date: Option<String>,
+    },
 }

@@ -183,6 +183,34 @@ impl Database {
         Ok(rows)
     }
 
+    /// Return a page of messages for a folder, ordered newest first.
+    pub async fn list_messages_page(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<MessageRow>, DbError> {
+        let rows = sqlx::query_as::<_, MessageRow>(
+            "SELECT id, account_id, folder_name, uid, message_id, subject, sender,
+                    to_addresses, cc_addresses, date, in_reply_to, reference_ids,
+                    is_read, is_flagged, is_answered, is_draft,
+                    preview, content_type, has_attachments,
+                    internal_date, body_text, body_html
+             FROM messages
+             WHERE account_id = ? AND folder_name = ?
+             ORDER BY COALESCE(internal_date, date) DESC, uid DESC
+             LIMIT ? OFFSET ?",
+        )
+        .bind(account_id)
+        .bind(folder_name)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
     /// Return messages for specific UIDs in a folder.
     pub async fn list_messages_by_uids(
         &self,
