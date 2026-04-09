@@ -287,7 +287,10 @@ where
     let mailbox = session.select(folder).await?;
     let exists = mailbox.exists;
 
+    tracing::debug!(folder, exists, "Selected folder");
+
     if exists == 0 {
+        tracing::debug!(folder, "Folder is empty, nothing to fetch");
         return Ok(vec![]);
     }
 
@@ -298,6 +301,8 @@ where
     while end > 0 {
         let start = if end > batch_size { end - batch_size + 1 } else { 1 };
         let range = format!("{}:{}", start, end);
+
+        tracing::debug!(folder, range = %range, "Fetching batch");
 
         // BODYSTRUCTURE omitted — imap-proto's parser fails on complex nested
         // MIME structures (e.g. multipart/related with inline images and
