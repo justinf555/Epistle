@@ -49,9 +49,17 @@ impl EmailPipeline {
     /// Run all steps against a message. Each step skips gracefully if its
     /// required data is missing from `raw`.
     pub fn process(&self, message: &mut Message, raw: &RawEmail) {
+        tracing::trace!(uid = raw.uid, "Processing message through pipeline");
         for step in &self.steps {
             step.process(message, raw);
         }
+        tracing::trace!(
+            uid = raw.uid,
+            subject = ?message.subject,
+            sender = ?message.sender,
+            is_read = message.is_read,
+            "Pipeline complete"
+        );
     }
 }
 

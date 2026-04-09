@@ -39,12 +39,17 @@ impl MailAccounts for MailAccountsImpl {
             })
             .collect();
 
+        tracing::debug!(count = fields.len(), "Persisting accounts to database");
+
         let changed = self.db.bulk_upsert_accounts(&fields).await?;
 
         if changed {
+            tracing::debug!(count = accounts.len(), "Data changed, emitting AccountsChanged");
             self.sender.send(AppEvent::AccountsChanged {
                 accounts: accounts.to_vec(),
             });
+        } else {
+            tracing::debug!("No account changes detected");
         }
 
         Ok(())

@@ -33,17 +33,31 @@ impl MailFolders for MailFoldersImpl {
             })
             .collect();
 
+        tracing::debug!(
+            account_id = %account.goa_id,
+            count = fields.len(),
+            "Persisting folders to database"
+        );
+
         let changed = self.db.bulk_upsert_folders(&account.goa_id, &fields).await?;
 
         if changed {
             let folder_rows = self.db.list_folders(&account.goa_id).await?;
             let result_folders: Vec<Folder> = folder_rows.into_iter().map(row_to_folder).collect();
 
+            tracing::debug!(
+                account_id = %account.goa_id,
+                count = result_folders.len(),
+                "Data changed, emitting FoldersChanged"
+            );
+
             self.sender.send(AppEvent::FoldersChanged {
                 account_id: account.goa_id.clone(),
                 email_address: account.email_address.clone(),
                 folders: result_folders,
             });
+        } else {
+            tracing::debug!(account_id = %account.goa_id, "No folder changes detected");
         }
 
         Ok(())
