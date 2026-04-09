@@ -53,6 +53,7 @@ fn main() -> glib::ExitCode {
     let sync = runtime.block_on(epistle::sync::service::SyncEngine::new(
         engine.accounts(),
         engine.folders(),
+        engine.messages(),
     )).expect("Failed to initialize sync engine");
     sync.start();
 

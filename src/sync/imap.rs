@@ -1,8 +1,10 @@
-use async_imap::types::NameAttribute;
+use async_imap::types::{Flag, NameAttribute};
 use futures::TryStreamExt;
+use async_imap::imap_proto::types::BodyStructure;
 use tokio::net::TcpStream;
 use tokio_native_tls::TlsConnector;
 
+use crate::engine::pipeline::{RawAddress, RawEmail};
 use crate::goa::types::{AuthMethod, ImapConfig, TlsMode};
 
 use thiserror::Error;
@@ -188,6 +190,216 @@ fn detect_role(name: &str, attrs: &[NameAttribute<'_>]) -> Option<String> {
     }
 
     None
+}
+
+// ── Message Fetching ────────────────────────────────────────────────────────
+
+/// Connect to an IMAP server, SELECT the given folder, FETCH message
+/// envelopes + flags + body structure in batches, and disconnect.
+///
+/// Returns a Vec of [`RawEmail`] ready for the processing pipeline.
+/// Fetches in batches of `batch_size` UIDs, newest first.
+pub async fn fetch_messages(
+    config: &ImapConfig,
+    auth: &AuthMethod,
+    folder: &str,
+    batch_size: u32,
+) -> Result<Vec<RawEmail>, ImapError> {
+    match config.tls_mode {
+        TlsMode::Implicit => fetch_messages_implicit(config, auth, folder, batch_size).await,
+        TlsMode::StartTls => fetch_messages_starttls(config, auth, folder, batch_size).await,
+        TlsMode::None => fetch_messages_plain(config, auth, folder, batch_size).await,
+    }
+}
+
+async fn fetch_messages_implicit(
+    config: &ImapConfig,
+    auth: &AuthMethod,
+    folder: &str,
+    batch_size: u32,
+) -> Result<Vec<RawEmail>, ImapError> {
+    let tcp = TcpStream::connect((&*config.host, config.port)).await?;
+    let tls = tls_connector(config)?;
+    let tls_stream = tls.connect(&config.host, tcp).await.map_err(|e| {
+        ImapError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))
+    })?;
+
+    let mut client = async_imap::Client::new(tls_stream);
+    client.read_response().await.transpose()?;
+
+    let mut session = authenticate(client, auth).await?;
+    let messages = fetch_from_session(&mut session, folder, batch_size).await?;
+    session.logout().await?;
+    Ok(messages)
+}
+
+async fn fetch_messages_starttls(
+    config: &ImapConfig,
+    auth: &AuthMethod,
+    folder: &str,
+    batch_size: u32,
+) -> Result<Vec<RawEmail>, ImapError> {
+    let tcp = TcpStream::connect((&*config.host, config.port)).await?;
+    let mut client = async_imap::Client::new(tcp);
+    client.read_response().await.transpose()?;
+    client
+        .run_command_and_check_ok("STARTTLS", None)
+        .await
+        .map_err(async_imap::error::Error::from)?;
+
+    let inner = client.into_inner();
+    let tls = tls_connector(config)?;
+    let tls_stream = tls.connect(&config.host, inner).await.map_err(|e| {
+        ImapError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))
+    })?;
+
+    let client = async_imap::Client::new(tls_stream);
+    let mut session = authenticate(client, auth).await?;
+    let messages = fetch_from_session(&mut session, folder, batch_size).await?;
+    session.logout().await?;
+    Ok(messages)
+}
+
+async fn fetch_messages_plain(
+    config: &ImapConfig,
+    auth: &AuthMethod,
+    folder: &str,
+    batch_size: u32,
+) -> Result<Vec<RawEmail>, ImapError> {
+    let tcp = TcpStream::connect((&*config.host, config.port)).await?;
+    let mut client = async_imap::Client::new(tcp);
+    client.read_response().await.transpose()?;
+
+    let mut session = authenticate(client, auth).await?;
+    let messages = fetch_from_session(&mut session, folder, batch_size).await?;
+    session.logout().await?;
+    Ok(messages)
+}
+
+/// SELECT folder, then FETCH envelopes in batches of UIDs (newest first).
+async fn fetch_from_session<T>(
+    session: &mut async_imap::Session<T>,
+    folder: &str,
+    batch_size: u32,
+) -> Result<Vec<RawEmail>, ImapError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    let mailbox = session.select(folder).await?;
+    let exists = mailbox.exists;
+
+    if exists == 0 {
+        return Ok(vec![]);
+    }
+
+    let mut all_messages = Vec::new();
+
+    // Fetch in batches, newest first (highest sequence numbers first)
+    let mut end = exists;
+    while end > 0 {
+        let start = if end > batch_size { end - batch_size + 1 } else { 1 };
+        let range = format!("{}:{}", start, end);
+
+        let fetches: Vec<_> = session
+            .fetch(&range, "(UID ENVELOPE FLAGS BODYSTRUCTURE)")
+            .await?
+            .try_collect()
+            .await?;
+
+        for fetch in &fetches {
+            let uid = match fetch.uid {
+                Some(uid) => uid,
+                None => continue,
+            };
+
+            let flags: Vec<String> = fetch
+                .flags()
+                .map(|f| match f {
+                    Flag::Seen => "\\Seen".to_string(),
+                    Flag::Answered => "\\Answered".to_string(),
+                    Flag::Flagged => "\\Flagged".to_string(),
+                    Flag::Deleted => "\\Deleted".to_string(),
+                    Flag::Draft => "\\Draft".to_string(),
+                    Flag::Recent => "\\Recent".to_string(),
+                    Flag::MayCreate => "\\MayCreate".to_string(),
+                    Flag::Custom(s) => s.to_string(),
+                })
+                .collect();
+
+            let mut raw = RawEmail {
+                uid,
+                flags,
+                subject: None,
+                from: None,
+                to: None,
+                cc: None,
+                date: None,
+                message_id: None,
+                in_reply_to: None,
+                has_attachments: None,
+                body_text: None,
+            };
+
+            if let Some(envelope) = fetch.envelope() {
+                raw.subject = envelope.subject.as_ref().map(|s| s.to_vec());
+                raw.date = envelope.date.as_ref().map(|d| d.to_vec());
+                raw.message_id = envelope.message_id.as_ref().map(|m| m.to_vec());
+                raw.in_reply_to = envelope.in_reply_to.as_ref().map(|r| r.to_vec());
+
+                raw.from = envelope.from.as_ref().map(|addrs| {
+                    addrs.iter().map(imap_addr_to_raw).collect()
+                });
+                raw.to = envelope.to.as_ref().map(|addrs| {
+                    addrs.iter().map(imap_addr_to_raw).collect()
+                });
+                raw.cc = envelope.cc.as_ref().map(|addrs| {
+                    addrs.iter().map(imap_addr_to_raw).collect()
+                });
+            }
+
+            if let Some(bs) = fetch.bodystructure() {
+                raw.has_attachments = Some(has_attachments(bs));
+            }
+
+            all_messages.push(raw);
+        }
+
+        if start == 1 {
+            break;
+        }
+        end = start - 1;
+    }
+
+    Ok(all_messages)
+}
+
+fn imap_addr_to_raw(addr: &async_imap::imap_proto::types::Address<'_>) -> RawAddress {
+    RawAddress {
+        name: addr.name.as_ref().map(|n: &std::borrow::Cow<'_, [u8]>| n.to_vec()),
+        mailbox: addr.mailbox.as_ref().map(|m: &std::borrow::Cow<'_, [u8]>| m.to_vec()),
+        host: addr.host.as_ref().map(|h: &std::borrow::Cow<'_, [u8]>| h.to_vec()),
+    }
+}
+
+/// Walk the BODYSTRUCTURE tree to detect if any part has disposition "attachment".
+fn has_attachments(bs: &BodyStructure<'_>) -> bool {
+    match bs {
+        BodyStructure::Basic { common, .. }
+        | BodyStructure::Text { common, .. }
+        | BodyStructure::Message { common, .. } => {
+            if let Some(ref disp) = common.disposition {
+                if disp.ty.eq_ignore_ascii_case("attachment") {
+                    return true;
+                }
+            }
+            // Recurse into Message bodies
+            if let BodyStructure::Message { body, .. } = bs {
+                return has_attachments(body);
+            }
+            false
+        }
+        BodyStructure::Multipart { bodies, .. } => bodies.iter().any(has_attachments),
+    }
 }
 
 /// XOAUTH2 SASL authenticator for OAuth providers (Gmail, Microsoft).

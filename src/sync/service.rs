@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use crate::app_event::AppEvent;
+use crate::engine::pipeline::EmailPipeline;
 use crate::engine::traits::accounts::{Account, MailAccounts};
 use crate::engine::traits::folders::{Folder, MailFolders};
+use crate::engine::traits::messages::{MailMessages, Message};
 use crate::goa::types::{GoaMailAccount, TlsMode};
 use crate::goa::GoaClient;
 use crate::sync::imap::ImapFolder;
@@ -15,10 +17,15 @@ use crate::sync::imap::ImapFolder;
 ///
 /// Knows nothing about GTK, the database, or event emission —
 /// it just pushes domain data into the engine, which handles the rest.
+/// Batch size for IMAP FETCH operations.
+const FETCH_BATCH_SIZE: u32 = 200;
+
 pub struct SyncEngine {
     goa: tokio::sync::Mutex<GoaClient>,
     accounts: Arc<dyn MailAccounts>,
     folders: Arc<dyn MailFolders>,
+    messages: Arc<dyn MailMessages>,
+    pipeline: EmailPipeline,
     running: std::sync::atomic::AtomicBool,
 }
 
@@ -27,12 +34,15 @@ impl SyncEngine {
     pub async fn new(
         accounts: Arc<dyn MailAccounts>,
         folders: Arc<dyn MailFolders>,
+        messages: Arc<dyn MailMessages>,
     ) -> anyhow::Result<Arc<Self>> {
         let goa = GoaClient::new().await?;
         Ok(Arc::new(Self {
             goa: tokio::sync::Mutex::new(goa),
             accounts,
             folders,
+            messages,
+            pipeline: EmailPipeline::new(),
             running: std::sync::atomic::AtomicBool::new(false),
         }))
     }
@@ -139,6 +149,98 @@ impl SyncEngine {
             .collect();
 
         futures::future::join_all(futures).await;
+
+        // ── Phase 1: Fetch messages from inbox ─────────────────────────────
+        // Re-acquire IMAP credentials for message fetch (tokens may have refreshed)
+        let mut inbox_tasks = Vec::new();
+        {
+            let goa = self.goa.lock().await;
+            for (account, goa_account) in domain_accounts.iter().zip(goa_accounts.iter()) {
+                match goa.get_imap_auth(&account.goa_id).await {
+                    Ok(auth) => {
+                        inbox_tasks.push((account.clone(), goa_account.imap_config.clone(), auth));
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "  Failed to get IMAP credentials for message sync {}: {e}",
+                            account.email_address
+                        );
+                    }
+                }
+            }
+        }
+
+        let msg_futures: Vec<_> = inbox_tasks
+            .into_iter()
+            .map(|(account, config, auth)| {
+                let messages_impl = Arc::clone(&self.messages);
+                let pipeline = &self.pipeline;
+                async move {
+                    match crate::sync::imap::fetch_messages(
+                        &config,
+                        &auth,
+                        "INBOX",
+                        FETCH_BATCH_SIZE,
+                    )
+                    .await
+                    {
+                        Ok(raw_emails) => {
+                            let messages: Vec<Message> = raw_emails
+                                .iter()
+                                .map(|raw| {
+                                    let mut msg = Message {
+                                        uid: raw.uid,
+                                        account_id: account.goa_id.clone(),
+                                        folder_name: "INBOX".to_string(),
+                                        message_id: None,
+                                        subject: None,
+                                        sender: None,
+                                        to_addresses: vec![],
+                                        cc_addresses: vec![],
+                                        date: None,
+                                        in_reply_to: None,
+                                        references: vec![],
+                                        is_read: false,
+                                        is_flagged: false,
+                                        is_answered: false,
+                                        is_draft: false,
+                                        preview: None,
+                                        content_type: None,
+                                        has_attachments: false,
+                                    };
+                                    pipeline.process(&mut msg, raw);
+                                    msg
+                                })
+                                .collect();
+
+                            eprintln!(
+                                "  {} messages in INBOX for {}",
+                                messages.len(),
+                                account.email_address
+                            );
+
+                            if let Err(e) = messages_impl
+                                .sync_messages(&account.goa_id, "INBOX", &messages)
+                                .await
+                            {
+                                eprintln!(
+                                    "  Failed to persist messages for {}: {e}",
+                                    account.email_address
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "  IMAP message fetch failed for {}: {e}",
+                                account.email_address
+                            );
+                        }
+                    }
+                }
+            })
+            .collect();
+
+        futures::future::join_all(msg_futures).await;
 
         Ok(())
     }

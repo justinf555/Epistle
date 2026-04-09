@@ -9,12 +9,16 @@ pub mod traits;
 
 pub mod accounts;
 pub mod folders;
+pub mod messages;
+pub mod pipeline;
 
 use accounts::MailAccountsImpl;
 use db::Database;
 use folders::MailFoldersImpl;
+use messages::MailMessagesImpl;
 use traits::accounts::MailAccounts;
 use traits::folders::MailFolders;
+use traits::messages::MailMessages;
 
 /// Central owner of the mail engine — database, event bus, and domain trait implementations.
 ///
@@ -26,6 +30,7 @@ pub struct MailEngine {
     sender: EventSender,
     accounts: Arc<dyn MailAccounts>,
     folders: Arc<dyn MailFolders>,
+    messages: Arc<dyn MailMessages>,
 }
 
 impl std::fmt::Debug for MailEngine {
@@ -44,13 +49,15 @@ impl MailEngine {
         let sender = bus.sender();
 
         let accounts = Arc::new(MailAccountsImpl::new(db.clone(), sender.clone()));
-        let folders = Arc::new(MailFoldersImpl::new(db, sender.clone()));
+        let folders = Arc::new(MailFoldersImpl::new(db.clone(), sender.clone()));
+        let messages = Arc::new(MailMessagesImpl::new(db, sender.clone()));
 
         Ok(Self {
             bus,
             sender,
             accounts,
             folders,
+            messages,
         })
     }
 
@@ -72,5 +79,10 @@ impl MailEngine {
     /// Folder storage trait object.
     pub fn folders(&self) -> Arc<dyn MailFolders> {
         Arc::clone(&self.folders)
+    }
+
+    /// Message storage trait object.
+    pub fn messages(&self) -> Arc<dyn MailMessages> {
+        Arc::clone(&self.messages)
     }
 }

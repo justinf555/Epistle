@@ -8,6 +8,7 @@ use thiserror::Error;
 
 pub mod accounts;
 pub mod folders;
+pub mod messages;
 
 #[derive(Debug, Error)]
 pub enum DbError {
