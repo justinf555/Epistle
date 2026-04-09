@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use adw::prelude::*;
@@ -25,6 +27,8 @@ mod imp {
         pub(super) sidebar_toggle: TemplateChild<gtk::ToggleButton>,
 
         pub(super) store: std::cell::OnceCell<gio::ListStore>,
+        /// UID → store index for O(1) lookups.
+        pub(super) uid_index: RefCell<HashMap<u32, u32>>,
         pub(super) accounts: std::cell::OnceCell<Arc<dyn MailAccounts>>,
         pub(super) messages: std::cell::OnceCell<Arc<dyn MailMessages>>,
     }
@@ -179,47 +183,72 @@ impl EpistleMessageList {
     }
 
     fn on_messages_changed(&self, messages: &[Message]) {
-        let store = self.imp().store.get().expect("store initialized");
-        let stack = &*self.imp().stack;
+        let imp = self.imp();
+        let store = imp.store.get().expect("store initialized");
+        let stack = &*imp.stack;
+        let mut index = imp.uid_index.borrow_mut();
 
         if messages.is_empty() {
             store.remove_all();
+            index.clear();
             stack.set_visible_child_name("empty");
             return;
         }
 
-        // Build a map of incoming messages keyed by UID for efficient lookup
-        let incoming: std::collections::HashMap<u32, &Message> =
-            messages.iter().map(|m| (m.uid, m)).collect();
+        // Build set of incoming UIDs for O(1) membership test
+        let incoming: HashMap<u32, &Message> = messages.iter().map(|m| (m.uid, m)).collect();
 
-        // Update existing items or mark for removal
-        let mut existing_uids = std::collections::HashSet::new();
-        let mut to_remove = Vec::new();
-        for i in 0..store.n_items() {
-            let obj = store.item(i).and_downcast::<MessageObject>().unwrap();
-            let uid = obj.uid();
+        // Pass 1: Update existing items in-place, collect stale indices
+        let mut stale_positions: Vec<u32> = Vec::new();
+        for (&uid, &pos) in index.iter() {
             if let Some(msg) = incoming.get(&uid) {
+                let obj = store.item(pos).and_downcast::<MessageObject>().unwrap();
                 obj.update_from(msg);
-                existing_uids.insert(uid);
             } else {
-                to_remove.push(i);
+                stale_positions.push(pos);
             }
         }
 
-        // Remove stale items (reverse order to keep indices valid)
-        for i in to_remove.into_iter().rev() {
-            store.remove(i);
+        // Pass 2: Remove stale items via splice (highest index first to keep positions valid)
+        stale_positions.sort_unstable_by(|a, b| b.cmp(a));
+        for pos in &stale_positions {
+            let obj = store.item(*pos).and_downcast::<MessageObject>().unwrap();
+            index.remove(&obj.uid());
+            store.remove(*pos);
         }
 
-        // Append new items not already in the store
-        for msg in messages {
-            if !existing_uids.contains(&msg.uid) {
-                store.append(&MessageObject::new(msg));
+        // Rebuild index positions after removals (positions shifted)
+        index.clear();
+        for i in 0..store.n_items() {
+            let obj = store.item(i).and_downcast::<MessageObject>().unwrap();
+            index.insert(obj.uid(), i);
+        }
+
+        // Pass 3: Collect new items not in the store
+        let new_items: Vec<MessageObject> = messages
+            .iter()
+            .filter(|m| !index.contains_key(&m.uid))
+            .map(MessageObject::new)
+            .collect();
+
+        if !new_items.is_empty() {
+            let insert_pos = store.n_items();
+            store.splice(insert_pos, 0, &new_items);
+
+            // Update index with new positions
+            for (i, item) in new_items.iter().enumerate() {
+                index.insert(item.uid(), insert_pos + i as u32);
             }
         }
 
         stack.set_visible_child_name("list");
 
-        tracing::debug!(count = store.n_items(), "Message list model updated");
+        tracing::debug!(
+            count = store.n_items(),
+            updated = messages.len().saturating_sub(new_items.len()),
+            added = new_items.len(),
+            removed = stale_positions.len(),
+            "Message list model updated"
+        );
     }
 }
