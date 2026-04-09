@@ -2,11 +2,14 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 
 use epistle::app_event::AppEvent;
 use epistle::engine::traits::accounts::MailAccounts;
 use epistle::engine::traits::messages::{MailMessages, Message};
+
+use super::factory;
+use super::item::MessageObject;
 
 mod imp {
     use super::*;
@@ -15,12 +18,13 @@ mod imp {
     #[template(resource = "/io/github/justinf555/Epistle/ui/message_list/message_list.ui")]
     pub struct EpistleMessageList {
         #[template_child]
-        pub(super) list_box: TemplateChild<gtk::ListBox>,
+        pub(super) list_view: TemplateChild<gtk::ListView>,
         #[template_child]
         pub(super) stack: TemplateChild<gtk::Stack>,
         #[template_child]
         pub(super) sidebar_toggle: TemplateChild<gtk::ToggleButton>,
 
+        pub(super) store: std::cell::OnceCell<gio::ListStore>,
         pub(super) accounts: std::cell::OnceCell<Arc<dyn MailAccounts>>,
         pub(super) messages: std::cell::OnceCell<Arc<dyn MailMessages>>,
     }
@@ -49,6 +53,13 @@ mod imp {
     impl ObjectImpl for EpistleMessageList {
         fn constructed(&self) {
             self.parent_constructed();
+
+            // Create the model (ListStore) and wire it with factory to ListView
+            let store = gio::ListStore::new::<MessageObject>();
+            let selection = gtk::SingleSelection::new(Some(store.clone()));
+            self.list_view.set_model(Some(&selection));
+            self.list_view.set_factory(Some(&factory::build_factory()));
+            self.store.set(store).expect("store set once in constructed");
         }
     }
 
@@ -168,127 +179,22 @@ impl EpistleMessageList {
     }
 
     fn on_messages_changed(&self, messages: &[Message]) {
-        let list_box = &*self.imp().list_box;
+        let store = self.imp().store.get().expect("store initialized");
         let stack = &*self.imp().stack;
 
-        // Clear existing rows
-        while let Some(child) = list_box.first_child() {
-            list_box.remove(&child);
-        }
-
         if messages.is_empty() {
+            store.remove_all();
             stack.set_visible_child_name("empty");
             return;
         }
 
+        // Replace the store contents with new MessageObjects
+        let objects: Vec<MessageObject> = messages.iter().map(MessageObject::new).collect();
+        store.remove_all();
+        store.extend_from_slice(&objects);
+
         stack.set_visible_child_name("list");
 
-        for msg in messages {
-            let row = build_message_row(msg);
-            list_box.append(&row);
-        }
-
-        tracing::debug!(count = messages.len(), "Message list updated");
-    }
-}
-
-// ── Row building (dynamic — not in template) ────────────────────────────────
-
-fn build_message_row(msg: &Message) -> gtk::ListBoxRow {
-    let row = gtk::ListBoxRow::new();
-    row.set_activatable(true);
-
-    let outer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    outer.set_margin_top(8);
-    outer.set_margin_bottom(8);
-    outer.set_margin_start(12);
-    outer.set_margin_end(12);
-
-    // Avatar
-    let name = display_sender(msg);
-    let avatar = adw::Avatar::new(32, Some(&name), true);
-    outer.append(&avatar);
-
-    // Text content
-    let text_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    text_box.set_hexpand(true);
-
-    // Top row: sender + timestamp
-    let top_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-
-    let sender_label = gtk::Label::new(Some(&name));
-    sender_label.set_xalign(0.0);
-    sender_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    sender_label.set_hexpand(true);
-    if !msg.is_read {
-        sender_label.add_css_class("heading");
-    }
-    top_row.append(&sender_label);
-
-    let time_label = gtk::Label::new(Some(&format_timestamp(msg.date.as_deref())));
-    time_label.set_xalign(1.0);
-    time_label.add_css_class("dim-label");
-    time_label.add_css_class("caption");
-    top_row.append(&time_label);
-
-    text_box.append(&top_row);
-
-    // Subject
-    let subject_label = gtk::Label::new(Some(
-        msg.subject.as_deref().unwrap_or("(no subject)"),
-    ));
-    subject_label.set_xalign(0.0);
-    subject_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    if !msg.is_read {
-        subject_label.add_css_class("heading");
-    }
-    text_box.append(&subject_label);
-
-    // Preview
-    if let Some(ref preview) = msg.preview {
-        let preview_label = gtk::Label::new(Some(preview));
-        preview_label.set_xalign(0.0);
-        preview_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        preview_label.add_css_class("dim-label");
-        preview_label.add_css_class("caption");
-        text_box.append(&preview_label);
-    }
-
-    outer.append(&text_box);
-
-    // Flagged star
-    if msg.is_flagged {
-        let star = gtk::Image::from_icon_name("starred-symbolic");
-        star.add_css_class("warning");
-        outer.append(&star);
-    }
-
-    row.set_child(Some(&outer));
-    row
-}
-
-fn display_sender(msg: &Message) -> String {
-    match &msg.sender {
-        Some(sender) => {
-            if let Some(idx) = sender.find(" <") {
-                sender[..idx].to_string()
-            } else {
-                sender.clone()
-            }
-        }
-        None => "(unknown)".to_string(),
-    }
-}
-
-fn format_timestamp(date: Option<&str>) -> String {
-    match date {
-        Some(d) => {
-            if d.len() > 16 {
-                d[..16].to_string()
-            } else {
-                d.to_string()
-            }
-        }
-        None => String::new(),
+        tracing::debug!(count = messages.len(), "Message list model updated");
     }
 }

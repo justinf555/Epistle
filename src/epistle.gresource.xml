@@ -4,6 +4,7 @@
     <file preprocess="xml-stripblanks">ui/window/window.ui</file>
     <file preprocess="xml-stripblanks">ui/sidebar/sidebar.ui</file>
     <file preprocess="xml-stripblanks">ui/message_list/message_list.ui</file>
+    <file preprocess="xml-stripblanks">ui/message_list/row.ui</file>
     <file preprocess="xml-stripblanks">shortcuts-dialog.ui</file>
   </gresource>
 </gresources>
