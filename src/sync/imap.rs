@@ -1,6 +1,5 @@
 use async_imap::types::{Flag, NameAttribute};
 use futures::TryStreamExt;
-use async_imap::imap_proto::types::BodyStructure;
 use tokio::net::TcpStream;
 use tokio_native_tls::TlsConnector;
 
@@ -300,8 +299,12 @@ where
         let start = if end > batch_size { end - batch_size + 1 } else { 1 };
         let range = format!("{}:{}", start, end);
 
+        // BODYSTRUCTURE omitted — imap-proto's parser fails on complex nested
+        // MIME structures (e.g. multipart/related with inline images and
+        // MIME-encoded filenames). Attachment detection deferred to Phase 2
+        // when we parse the body ourselves with mail-parser.
         let fetches: Vec<_> = session
-            .fetch(&range, "(UID ENVELOPE FLAGS BODYSTRUCTURE)")
+            .fetch(&range, "(UID ENVELOPE FLAGS)")
             .await?
             .try_collect()
             .await?;
@@ -357,10 +360,6 @@ where
                 });
             }
 
-            if let Some(bs) = fetch.bodystructure() {
-                raw.has_attachments = Some(has_attachments(bs));
-            }
-
             all_messages.push(raw);
         }
 
@@ -378,27 +377,6 @@ fn imap_addr_to_raw(addr: &async_imap::imap_proto::types::Address<'_>) -> RawAdd
         name: addr.name.as_ref().map(|n: &std::borrow::Cow<'_, [u8]>| n.to_vec()),
         mailbox: addr.mailbox.as_ref().map(|m: &std::borrow::Cow<'_, [u8]>| m.to_vec()),
         host: addr.host.as_ref().map(|h: &std::borrow::Cow<'_, [u8]>| h.to_vec()),
-    }
-}
-
-/// Walk the BODYSTRUCTURE tree to detect if any part has disposition "attachment".
-fn has_attachments(bs: &BodyStructure<'_>) -> bool {
-    match bs {
-        BodyStructure::Basic { common, .. }
-        | BodyStructure::Text { common, .. }
-        | BodyStructure::Message { common, .. } => {
-            if let Some(ref disp) = common.disposition {
-                if disp.ty.eq_ignore_ascii_case("attachment") {
-                    return true;
-                }
-            }
-            // Recurse into Message bodies
-            if let BodyStructure::Message { body, .. } = bs {
-                return has_attachments(body);
-            }
-            false
-        }
-        BodyStructure::Multipart { bodies, .. } => bodies.iter().any(has_attachments),
     }
 }
 
