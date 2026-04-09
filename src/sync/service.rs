@@ -3,10 +3,12 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use crate::app_event::AppEvent;
+use crate::engine::pipeline::parse_body::parse_mime_body;
 use crate::engine::pipeline::EmailPipeline;
 use crate::engine::traits::accounts::{Account, MailAccounts};
 use crate::engine::traits::folders::{Folder, MailFolders};
 use crate::engine::traits::messages::{MailMessages, Message};
+use crate::event_bus::EventSender;
 use crate::goa::types::{GoaMailAccount, TlsMode};
 use crate::goa::GoaClient;
 use crate::sync::imap::ImapFolder;
@@ -27,6 +29,7 @@ pub struct SyncEngine {
     accounts: Arc<dyn MailAccounts>,
     folders: Arc<dyn MailFolders>,
     messages: Arc<dyn MailMessages>,
+    sender: EventSender,
     pipeline: EmailPipeline,
     running: std::sync::atomic::AtomicBool,
 }
@@ -37,6 +40,7 @@ impl SyncEngine {
         accounts: Arc<dyn MailAccounts>,
         folders: Arc<dyn MailFolders>,
         messages: Arc<dyn MailMessages>,
+        sender: EventSender,
     ) -> anyhow::Result<Arc<Self>> {
         let goa = GoaClient::new().await?;
         Ok(Arc::new(Self {
@@ -44,6 +48,7 @@ impl SyncEngine {
             accounts,
             folders,
             messages,
+            sender,
             pipeline: EmailPipeline::new(),
             running: std::sync::atomic::AtomicBool::new(false),
         }))
@@ -66,6 +71,23 @@ impl SyncEngine {
                 AppEvent::AppShutdown => {
                     info!("Shutting down sync engine");
                     engine.stop();
+                }
+                AppEvent::MessageBodyRequested { account_id, folder_name, uid } => {
+                    let engine = Arc::clone(&engine);
+                    let account_id = account_id.clone();
+                    let folder_name = folder_name.clone();
+                    let uid = *uid;
+                    tokio::spawn(async move {
+                        if let Err(e) = engine.fetch_and_cache_body(&account_id, &folder_name, uid).await {
+                            error!(
+                                account_id = %account_id,
+                                folder_name = %folder_name,
+                                uid,
+                                error = %e,
+                                "Body fetch failed"
+                            );
+                        }
+                    });
                 }
                 _ => {}
             }
@@ -252,6 +274,8 @@ impl SyncEngine {
                                         preview: None,
                                         content_type: None,
                                         has_attachments: false,
+                                        body_text: None,
+                                        body_html: None,
                                     };
                                     pipeline.process(&mut msg, raw);
                                     msg
@@ -291,6 +315,76 @@ impl SyncEngine {
         futures::future::join_all(msg_futures).await;
 
         info!("Initial sync complete");
+        Ok(())
+    }
+
+    /// Fetch a single message body from IMAP, parse MIME, cache in DB, emit event.
+    async fn fetch_and_cache_body(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+    ) -> anyhow::Result<()> {
+        debug!(account_id, folder_name, uid, "Fetching message body");
+
+        // Check DB cache first
+        if let Some(body) = self.messages.get_body(account_id, folder_name, uid).await? {
+            if body.body_text.is_some() || body.body_html.is_some() {
+                debug!(uid, "Body already cached, emitting from cache");
+                self.sender.send(AppEvent::MessageBodyFetched {
+                    account_id: account_id.to_string(),
+                    folder_name: folder_name.to_string(),
+                    uid,
+                    body,
+                });
+                return Ok(());
+            }
+        }
+
+        // Get IMAP config + auth
+        let mut goa = self.goa.lock().await;
+        let goa_accounts = goa.discover_accounts().await?;
+        let goa_account = goa_accounts
+            .iter()
+            .find(|a| a.goa_id == account_id)
+            .ok_or_else(|| anyhow::anyhow!("Account {account_id} not found in GOA"))?;
+
+        let auth = goa.get_imap_auth(account_id).await?;
+        let config = goa_account.imap_config.clone();
+        drop(goa); // Release GOA lock before IMAP I/O
+
+        // Fetch from IMAP
+        let raw_bytes = crate::sync::imap::fetch_message_body(&config, &auth, folder_name, uid).await?;
+
+        // Parse MIME
+        let body = parse_mime_body(&raw_bytes);
+
+        // Cache in DB
+        self.messages
+            .cache_body(
+                account_id,
+                folder_name,
+                uid,
+                body.body_text.as_deref(),
+                body.body_html.as_deref(),
+            )
+            .await?;
+
+        debug!(
+            uid,
+            has_html = body.body_html.is_some(),
+            has_text = body.body_text.is_some(),
+            "Body fetched and cached"
+        );
+
+        // Emit event
+        self.sender.send(AppEvent::MessageBodyFetched {
+            account_id: account_id.to_string(),
+            folder_name: folder_name.to_string(),
+            uid,
+            body,
+        });
+
         Ok(())
     }
 }

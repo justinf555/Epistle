@@ -14,21 +14,6 @@ template $EpistleWindow : Adw.ApplicationWindow {
       content: Adw.NavigationSplitView inner_split {
         min-sidebar-width: 280;
         max-sidebar-width: 400;
-
-        content: Adw.NavigationPage {
-          title: _("Message");
-
-          child: Adw.ToolbarView {
-            [top]
-            Adw.HeaderBar {}
-
-            content: Adw.StatusPage content_empty {
-              icon-name: "mail-read-symbolic";
-              title: _("Select a Message");
-              description: _("Choose a message from the list to read it.");
-            };
-          };
-        };
       };
     }
   };

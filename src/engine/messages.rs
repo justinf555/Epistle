@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::app_event::AppEvent;
 use crate::engine::db::messages::MessageFields;
 use crate::engine::db::Database;
-use crate::engine::traits::messages::{MailMessages, Message};
+use crate::engine::traits::messages::{MailMessages, Message, MessageBody};
 use crate::event_bus::EventSender;
 
 /// Concrete implementation of [`MailMessages`] backed by SQLite + EventSender.
@@ -142,6 +142,36 @@ impl MailMessages for MailMessagesImpl {
         let rows = self.db.list_messages(account_id, folder_name).await?;
         Ok(rows.into_iter().map(row_to_message).collect())
     }
+
+    async fn cache_body(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+        body_text: Option<&str>,
+        body_html: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.db
+            .update_message_body(account_id, folder_name, uid, body_text, body_html)
+            .await?;
+        Ok(())
+    }
+
+    async fn get_body(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+    ) -> anyhow::Result<Option<MessageBody>> {
+        let row = self
+            .db
+            .get_message_body(account_id, folder_name, uid)
+            .await?;
+        Ok(row.map(|(text, html)| MessageBody {
+            body_text: text,
+            body_html: html,
+        }))
+    }
 }
 
 fn row_to_message(row: crate::engine::db::messages::MessageRow) -> Message {
@@ -173,5 +203,7 @@ fn row_to_message(row: crate::engine::db::messages::MessageRow) -> Message {
         preview: row.preview,
         content_type: row.content_type,
         has_attachments: row.has_attachments,
+        body_text: row.body_text,
+        body_html: row.body_html,
     }
 }

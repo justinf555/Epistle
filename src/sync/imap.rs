@@ -380,6 +380,115 @@ fn imap_addr_to_raw(addr: &async_imap::imap_proto::types::Address<'_>) -> RawAdd
     }
 }
 
+// ── Single-Message Body Fetch ────────────────────────────────────────────────
+
+/// Connect to IMAP, SELECT the folder, UID FETCH the full message body,
+/// and return the raw RFC 5322 bytes. Single-shot connection.
+pub async fn fetch_message_body(
+    config: &ImapConfig,
+    auth: &AuthMethod,
+    folder: &str,
+    uid: u32,
+) -> Result<Vec<u8>, ImapError> {
+    match config.tls_mode {
+        TlsMode::Implicit => fetch_body_implicit(config, auth, folder, uid).await,
+        TlsMode::StartTls => fetch_body_starttls(config, auth, folder, uid).await,
+        TlsMode::None => fetch_body_plain(config, auth, folder, uid).await,
+    }
+}
+
+async fn fetch_body_implicit(
+    config: &ImapConfig,
+    auth: &AuthMethod,
+    folder: &str,
+    uid: u32,
+) -> Result<Vec<u8>, ImapError> {
+    let tcp = TcpStream::connect((&*config.host, config.port)).await?;
+    let tls = tls_connector(config)?;
+    let tls_stream = tls.connect(&config.host, tcp).await.map_err(|e| {
+        ImapError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))
+    })?;
+
+    let mut client = async_imap::Client::new(tls_stream);
+    client.read_response().await.transpose()?;
+
+    let mut session = authenticate(client, auth).await?;
+    let body = fetch_body_from_session(&mut session, folder, uid).await?;
+    session.logout().await?;
+    Ok(body)
+}
+
+async fn fetch_body_starttls(
+    config: &ImapConfig,
+    auth: &AuthMethod,
+    folder: &str,
+    uid: u32,
+) -> Result<Vec<u8>, ImapError> {
+    let tcp = TcpStream::connect((&*config.host, config.port)).await?;
+    let mut client = async_imap::Client::new(tcp);
+    client.read_response().await.transpose()?;
+    client
+        .run_command_and_check_ok("STARTTLS", None)
+        .await
+        .map_err(async_imap::error::Error::from)?;
+
+    let inner = client.into_inner();
+    let tls = tls_connector(config)?;
+    let tls_stream = tls.connect(&config.host, inner).await.map_err(|e| {
+        ImapError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))
+    })?;
+
+    let client = async_imap::Client::new(tls_stream);
+    let mut session = authenticate(client, auth).await?;
+    let body = fetch_body_from_session(&mut session, folder, uid).await?;
+    session.logout().await?;
+    Ok(body)
+}
+
+async fn fetch_body_plain(
+    config: &ImapConfig,
+    auth: &AuthMethod,
+    folder: &str,
+    uid: u32,
+) -> Result<Vec<u8>, ImapError> {
+    let tcp = TcpStream::connect((&*config.host, config.port)).await?;
+    let mut client = async_imap::Client::new(tcp);
+    client.read_response().await.transpose()?;
+
+    let mut session = authenticate(client, auth).await?;
+    let body = fetch_body_from_session(&mut session, folder, uid).await?;
+    session.logout().await?;
+    Ok(body)
+}
+
+/// SELECT folder, UID FETCH the full message body for a single UID.
+async fn fetch_body_from_session<T>(
+    session: &mut async_imap::Session<T>,
+    folder: &str,
+    uid: u32,
+) -> Result<Vec<u8>, ImapError>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
+{
+    session.select(folder).await?;
+
+    let uid_str = uid.to_string();
+    let fetches: Vec<_> = session
+        .uid_fetch(&uid_str, "BODY[]")
+        .await?
+        .try_collect()
+        .await?;
+
+    for fetch in &fetches {
+        if let Some(body) = fetch.body() {
+            tracing::debug!(uid, bytes = body.len(), "Fetched message body");
+            return Ok(body.to_vec());
+        }
+    }
+
+    Err(ImapError::Auth(format!("No body returned for UID {uid}")))
+}
+
 /// XOAUTH2 SASL authenticator for OAuth providers (Gmail, Microsoft).
 struct XOAuth2Auth<'a> {
     token: &'a str,

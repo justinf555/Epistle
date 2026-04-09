@@ -16,6 +16,8 @@ mod extract_flags;
 mod extract_metadata;
 mod extract_preview;
 pub mod helpers;
+pub mod parse_body;
+pub mod sanitise;
 pub mod types;
 
 use crate::engine::traits::messages::Message;
@@ -87,6 +89,8 @@ mod tests {
             preview: None,
             content_type: None,
             has_attachments: false,
+            body_text: None,
+            body_html: None,
         }
     }
 

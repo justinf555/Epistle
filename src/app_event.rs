@@ -1,6 +1,6 @@
 use crate::engine::traits::accounts::Account;
 use crate::engine::traits::folders::Folder;
-use crate::engine::traits::messages::Message;
+use crate::engine::traits::messages::{Message, MessageBody};
 
 /// Application-layer event type.
 ///
@@ -43,5 +43,20 @@ pub enum AppEvent {
         account_id: String,
         folder_name: String,
         uids: Vec<u32>,
+    },
+
+    /// UI requests the body for a specific message.
+    MessageBodyRequested {
+        account_id: String,
+        folder_name: String,
+        uid: u32,
+    },
+
+    /// Body content fetched, parsed, and cached for a message.
+    MessageBodyFetched {
+        account_id: String,
+        folder_name: String,
+        uid: u32,
+        body: MessageBody,
     },
 }

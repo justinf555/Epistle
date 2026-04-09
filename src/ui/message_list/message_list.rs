@@ -27,6 +27,7 @@ mod imp {
         pub(super) sidebar_toggle: TemplateChild<gtk::ToggleButton>,
 
         pub(super) store: std::cell::OnceCell<gio::ListStore>,
+        pub(super) selection: std::cell::OnceCell<gtk::SingleSelection>,
         /// UID → store index for O(1) lookups.
         pub(super) uid_index: RefCell<HashMap<u32, u32>>,
         pub(super) accounts: std::cell::OnceCell<Arc<dyn MailAccounts>>,
@@ -64,6 +65,9 @@ mod imp {
             self.list_view.set_model(Some(&selection));
             self.list_view.set_factory(Some(&factory::build_factory()));
             self.store.set(store).expect("store set once in constructed");
+            self.selection
+                .set(selection)
+                .expect("selection set once in constructed");
         }
     }
 
@@ -117,6 +121,14 @@ impl EpistleMessageList {
     /// Access the sidebar toggle button for wiring to the outer split view.
     pub fn sidebar_toggle(&self) -> &gtk::ToggleButton {
         &self.imp().sidebar_toggle
+    }
+
+    /// Access the selection model for wiring selection changes.
+    pub fn selection_model(&self) -> &gtk::SingleSelection {
+        self.imp()
+            .selection
+            .get()
+            .expect("selection initialized")
     }
 
     fn subscribe_events(&self) {

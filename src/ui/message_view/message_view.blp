@@ -1,0 +1,43 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $EpistleMessageView : Adw.NavigationPage {
+  title: _("Message");
+
+  child: Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {}
+
+    content: Gtk.Stack stack {
+      Gtk.StackPage {
+        name: "empty";
+        child: Adw.StatusPage empty_page {
+          icon-name: "mail-read-symbolic";
+          title: _("Select a Message");
+          description: _("Choose a message from the list to read it.");
+        };
+      }
+
+      Gtk.StackPage {
+        name: "loading";
+        child: Gtk.Box {
+          orientation: vertical;
+          valign: center;
+          halign: center;
+          Gtk.Spinner spinner {
+            spinning: true;
+            width-request: 32;
+            height-request: 32;
+          }
+        };
+      }
+
+      Gtk.StackPage {
+        name: "content";
+        child: Gtk.Box content_box {
+          orientation: vertical;
+        };
+      }
+    };
+  };
+}

@@ -16,6 +16,10 @@ mod imp {
         #[property(get, set)]
         pub uid: Cell<u32>,
         #[property(get, set, nullable)]
+        pub account_id: RefCell<Option<String>>,
+        #[property(get, set, nullable)]
+        pub folder_name: RefCell<Option<String>>,
+        #[property(get, set, nullable)]
         pub sender: RefCell<Option<String>>,
         #[property(get, set, nullable)]
         pub subject: RefCell<Option<String>>,
@@ -48,6 +52,8 @@ impl MessageObject {
     pub fn new(msg: &Message) -> Self {
         let obj: Self = glib::Object::new();
         obj.set_uid(msg.uid);
+        obj.set_account_id(Some(msg.account_id.clone()));
+        obj.set_folder_name(Some(msg.folder_name.clone()));
         obj.set_sender(msg.sender.clone());
         obj.set_subject(msg.subject.clone());
         obj.set_date(msg.date.clone());
