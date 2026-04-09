@@ -11,10 +11,10 @@ use std::collections::HashSet;
 /// Sanitise HTML email body for safe rendering in WebKitWebView.
 ///
 /// - Strips JavaScript and dangerous tags
-/// - Blocks remote images (only allows `cid:` and `data:` URL schemes)
+/// - Allows `cid:`, `data:`, `https:`, and `http:` URL schemes
 /// - Adds `noopener noreferrer` to links
 pub fn sanitise_html(html: &str) -> String {
-    let allowed_schemes: HashSet<&str> = ["cid", "data"].into_iter().collect();
+    let allowed_schemes: HashSet<&str> = ["cid", "data", "https", "http"].into_iter().collect();
 
     ammonia::Builder::new()
         .url_schemes(allowed_schemes)
@@ -53,10 +53,10 @@ mod tests {
     }
 
     #[test]
-    fn blocks_remote_images() {
-        let html = r#"<img src="https://tracker.evil.com/pixel.gif"><p>Text</p>"#;
+    fn preserves_remote_images() {
+        let html = r#"<img src="https://example.com/image.png"><p>Text</p>"#;
         let clean = sanitise_html(html);
-        assert!(!clean.contains("tracker.evil.com"));
+        assert!(clean.contains("https://example.com/image.png"));
         assert!(clean.contains("Text"));
     }
 

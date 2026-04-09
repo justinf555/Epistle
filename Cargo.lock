@@ -614,6 +614,7 @@ dependencies = [
  "anyhow",
  "async-imap",
  "async-trait",
+ "base64",
  "chrono",
  "futures",
  "gettext-rs",

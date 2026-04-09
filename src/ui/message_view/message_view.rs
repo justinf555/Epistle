@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -9,6 +10,9 @@ use epistle::app_event::AppEvent;
 use epistle::engine::pipeline::sanitise;
 use epistle::engine::traits::messages::MessageBody;
 use epistle::event_bus::EventSender;
+
+/// Internal URI used to load the message body through our custom scheme.
+const URI_BODY: &str = "epistle:body";
 
 mod imp {
     use super::*;
@@ -23,9 +27,13 @@ mod imp {
 
         pub(super) sender: std::cell::OnceCell<EventSender>,
         pub(super) webview: RefCell<Option<webkit6::WebView>>,
+        pub(super) web_context: std::cell::OnceCell<webkit6::WebContext>,
         pub(super) current_uid: Cell<u32>,
         pub(super) current_account_id: RefCell<String>,
         pub(super) current_folder: RefCell<String>,
+
+        /// HTML body served by the `epistle:` URI scheme handler.
+        pub(super) current_html: Rc<RefCell<String>>,
 
         // Header widgets (added dynamically to content_box)
         pub(super) header_box: std::cell::OnceCell<gtk::Box>,
@@ -134,7 +142,7 @@ impl EpistleMessageView {
 
         // Clear previous webview content
         if let Some(wv) = imp.webview.borrow().as_ref() {
-            wv.load_html("", None);
+            wv.load_uri("about:blank");
         }
 
         // Show loading state
@@ -224,7 +232,7 @@ impl EpistleMessageView {
             label.set_text("");
         }
         if let Some(wv) = imp.webview.borrow().as_ref() {
-            wv.load_html("", None);
+            wv.load_uri("about:blank");
         }
         imp.stack.set_visible_child_name("empty");
     }
@@ -240,10 +248,40 @@ impl EpistleMessageView {
             sanitise::plain_text_to_html("(no content)")
         };
 
+        // Store HTML for the URI scheme handler to serve.
+        *imp.current_html.borrow_mut() = html;
+
+        // Load via our custom scheme so WebKit has a proper origin
+        // and can fetch external sub-resources (remote images).
         let webview = self.ensure_webview();
-        webview.load_html(&html, None);
+        webview.load_uri(URI_BODY);
 
         imp.stack.set_visible_child_name("content");
+    }
+
+    /// Create or return the WebContext with the `epistle:` URI scheme registered.
+    fn ensure_web_context(&self) -> &webkit6::WebContext {
+        let imp = self.imp();
+        imp.web_context.get_or_init(|| {
+            let ctx = webkit6::WebContext::new();
+
+            // Register the epistle: scheme to serve HTML bodies.
+            let html_ref = Rc::clone(&imp.current_html);
+            ctx.register_uri_scheme("epistle", move |request| {
+                let html = html_ref.borrow();
+                let bytes = glib::Bytes::from(html.as_bytes());
+                let stream = gtk::gio::MemoryInputStream::from_bytes(&bytes);
+                request.finish(&stream, html.len() as i64, Some("text/html; charset=utf-8"));
+            });
+
+            // Mark the scheme as local + secure so WebKit allows sub-resource loads.
+            if let Some(security) = ctx.security_manager() {
+                security.register_uri_scheme_as_local("epistle");
+                security.register_uri_scheme_as_secure("epistle");
+            }
+
+            ctx
+        })
     }
 
     /// Create or return the WebKitWebView with security settings.
@@ -258,10 +296,15 @@ impl EpistleMessageView {
         settings.set_allow_modal_dialogs(false);
         settings.set_enable_developer_extras(false);
 
-        let webview = webkit6::WebView::builder()
-            .settings(&settings)
-            .vexpand(true)
-            .hexpand(true)
+        let context = self.ensure_web_context();
+        let network_session = webkit6::NetworkSession::new_ephemeral();
+
+        let webview = glib::Object::builder::<webkit6::WebView>()
+            .property("settings", &settings)
+            .property("web-context", context)
+            .property("network-session", &network_session)
+            .property("vexpand", true)
+            .property("hexpand", true)
             .build();
 
         // Open links externally via Flatpak portal
@@ -274,10 +317,15 @@ impl EpistleMessageView {
                         if let Some(action) = nav.navigation_action() {
                             if let Some(req) = action.request() {
                                 if let Some(uri) = req.uri() {
-                                    if !uri.is_empty()
-                                        && uri.as_str() != "about:blank"
-                                        && !uri.starts_with("data:")
+                                    let uri_str = uri.as_str();
+                                    // Allow our internal scheme and blank pages
+                                    if uri_str.starts_with("epistle:")
+                                        || uri_str == "about:blank"
                                     {
+                                        return false;
+                                    }
+                                    // Open everything else externally
+                                    if !uri_str.is_empty() {
                                         let launcher =
                                             gtk::UriLauncher::new(&uri);
                                         launcher.launch(
