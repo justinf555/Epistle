@@ -1,18 +1,27 @@
+use std::sync::Arc;
+
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::glib;
 
 use epistle::app_event::AppEvent;
-use epistle::event_bus::EventBus;
-use epistle::engine::traits::accounts::Account;
-use epistle::engine::traits::folders::Folder;
+use epistle::engine::traits::accounts::{Account, MailAccounts};
+use epistle::engine::traits::folders::{Folder, MailFolders};
 
 mod imp {
     use super::*;
 
-    #[derive(Debug, Default)]
+    #[derive(Default)]
     pub struct EpistleSidebar {
         pub(super) sidebar: std::cell::OnceCell<adw::Sidebar>,
+        pub(super) accounts: std::cell::OnceCell<Arc<dyn MailAccounts>>,
+        pub(super) folders: std::cell::OnceCell<Arc<dyn MailFolders>>,
+    }
+
+    impl std::fmt::Debug for EpistleSidebar {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("EpistleSidebar").finish()
+        }
     }
 
     #[glib::object_subclass]
@@ -63,7 +72,21 @@ mod imp {
         }
     }
 
-    impl WidgetImpl for EpistleSidebar {}
+    impl WidgetImpl for EpistleSidebar {
+        fn root(&self) {
+            self.parent_root();
+            let obj = self.obj();
+            obj.subscribe_events();
+            obj.load_cached();
+        }
+
+        fn unroot(&self) {
+            // EventBus subscriptions use weak refs — they become no-ops
+            // after the widget is dropped. No explicit cleanup needed yet.
+            self.parent_unroot();
+        }
+    }
+
     impl NavigationPageImpl for EpistleSidebar {}
 
     impl EpistleSidebar {
@@ -104,11 +127,17 @@ impl EpistleSidebar {
         glib::Object::builder().build()
     }
 
-    /// Subscribe to the event bus for account and folder updates.
-    pub fn subscribe_events(&self, bus: &EventBus) {
-        let sidebar_weak = self.downgrade();
+    /// Inject engine trait objects. Must be called before the widget is rooted.
+    pub fn set_engine(&self, accounts: Arc<dyn MailAccounts>, folders: Arc<dyn MailFolders>) {
+        let imp = self.imp();
+        imp.accounts.set(accounts).ok().expect("accounts set once");
+        imp.folders.set(folders).ok().expect("folders set once");
+    }
 
-        bus.subscribe(move |event| {
+    /// Subscribe to events via the free function. Called from root().
+    fn subscribe_events(&self) {
+        let sidebar_weak = self.downgrade();
+        epistle::event_bus::subscribe(move |event| {
             let Some(sidebar) = sidebar_weak.upgrade() else {
                 return;
             };
@@ -128,10 +157,36 @@ impl EpistleSidebar {
         });
     }
 
+    /// Load cached accounts and folders from the engine. Called from root().
+    fn load_cached(&self) {
+        let accounts = Arc::clone(self.imp().accounts.get().expect("engine set before root"));
+        let folders = Arc::clone(self.imp().folders.get().expect("engine set before root"));
+
+        let sidebar_weak = self.downgrade();
+        glib::MainContext::default().spawn_local(async move {
+            let Some(sidebar) = sidebar_weak.upgrade() else {
+                return;
+            };
+            let Ok(cached_accounts) = accounts.list_accounts().await else {
+                return;
+            };
+            if cached_accounts.is_empty() {
+                return;
+            }
+            sidebar.on_accounts_changed(&cached_accounts);
+            for account in &cached_accounts {
+                if let Ok(cached_folders) = folders.list_folders(&account.goa_id).await {
+                    if !cached_folders.is_empty() {
+                        sidebar.on_folders_changed(&account.email_address, &cached_folders);
+                    }
+                }
+            }
+        });
+    }
+
     fn on_accounts_changed(&self, accounts: &[Account]) {
         let sidebar = self.imp().sidebar.get().expect("sidebar initialized");
 
-        // Add empty sections for each account (folders arrive later)
         for account in accounts {
             let section = adw::SidebarSection::new();
             section.set_title(Some(&account.email_address));
@@ -142,7 +197,6 @@ impl EpistleSidebar {
     fn on_folders_changed(&self, email_address: &str, folders: &[Folder]) {
         let sidebar = self.imp().sidebar.get().expect("sidebar initialized");
 
-        // Find the section for this account by title
         let sections = sidebar.sections();
         for i in 0..sections.n_items() {
             let Some(section) = sidebar.section(i) else {
@@ -178,7 +232,6 @@ fn icon_for_role(role: Option<&str>) -> &'static str {
     }
 }
 
-/// Show a friendly name for standard roles, or the last path component for custom folders.
 fn display_name_for_folder(name: &str, role: Option<&str>) -> String {
     match role {
         Some("inbox") => "Inbox".to_string(),

@@ -19,34 +19,49 @@ pub struct SyncEngine {
     goa: tokio::sync::Mutex<GoaClient>,
     accounts: Arc<dyn MailAccounts>,
     folders: Arc<dyn MailFolders>,
+    running: std::sync::atomic::AtomicBool,
 }
 
 impl SyncEngine {
-    pub fn new(
-        goa: GoaClient,
+    /// Create a new SyncEngine. Connects to GOA over D-Bus.
+    pub async fn new(
         accounts: Arc<dyn MailAccounts>,
         folders: Arc<dyn MailFolders>,
-    ) -> Arc<Self> {
-        Arc::new(Self {
+    ) -> anyhow::Result<Arc<Self>> {
+        let goa = GoaClient::new().await?;
+        Ok(Arc::new(Self {
             goa: tokio::sync::Mutex::new(goa),
             accounts,
             folders,
-        })
+            running: std::sync::atomic::AtomicBool::new(false),
+        }))
     }
 
-    /// Subscribe to the event bus. Reacts to lifecycle events.
-    pub fn subscribe(self: &Arc<Self>) {
+    /// Start the sync service. Subscribes to lifecycle events and reacts.
+    pub fn start(self: &Arc<Self>) {
+        self.running.store(true, std::sync::atomic::Ordering::Relaxed);
         let engine = Arc::clone(self);
         crate::event_bus::subscribe(move |event| {
-            if matches!(event, AppEvent::AppStarted) {
-                let engine = Arc::clone(&engine);
-                tokio::spawn(async move {
-                    if let Err(e) = engine.run_initial_sync().await {
-                        eprintln!("Initial sync failed: {e}");
-                    }
-                });
+            match event {
+                AppEvent::AppStarted if engine.running.load(std::sync::atomic::Ordering::Relaxed) => {
+                    let engine = Arc::clone(&engine);
+                    tokio::spawn(async move {
+                        if let Err(e) = engine.run_initial_sync().await {
+                            eprintln!("Initial sync failed: {e}");
+                        }
+                    });
+                }
+                AppEvent::AppShutdown => {
+                    engine.stop();
+                }
+                _ => {}
             }
         });
+    }
+
+    /// Stop the sync service. Events will be ignored until start() is called again.
+    pub fn stop(&self) {
+        self.running.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Run account discovery + folder sync for all accounts.

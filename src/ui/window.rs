@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib};
 
-use epistle::event_bus::EventBus;
+use epistle::engine::traits::accounts::MailAccounts;
+use epistle::engine::traits::folders::MailFolders;
 
 use super::sidebar::EpistleSidebar;
 
@@ -43,7 +46,6 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             let window = self.obj();
-            window.setup_sidebar();
             window.setup_sidebar_toggle();
         }
     }
@@ -72,18 +74,18 @@ impl EpistleWindow {
         self.imp().sidebar.get().expect("sidebar initialized")
     }
 
-    /// Wire the sidebar (and future components) to the event bus.
-    pub fn subscribe_events(&self, bus: &EventBus) {
-        self.sidebar().subscribe_events(bus);
-    }
-
-    fn setup_sidebar(&self) {
+    /// Pass engine trait objects to child components, then parent the sidebar.
+    ///
+    /// The sidebar receives its engine references first, then gets added to the
+    /// split view — which triggers root(), where it subscribes to events and
+    /// loads cached data.
+    pub fn set_engine(&self, accounts: Arc<dyn MailAccounts>, folders: Arc<dyn MailFolders>) {
         let sidebar = EpistleSidebar::new();
+        sidebar.set_engine(accounts, folders);
+
+        // Parenting triggers root() — sidebar is now fully wired
         self.imp().outer_split.set_sidebar(Some(&sidebar));
-        self.imp()
-            .sidebar
-            .set(sidebar)
-            .expect("sidebar set once");
+        self.imp().sidebar.set(sidebar).expect("sidebar set once");
     }
 
     fn setup_sidebar_toggle(&self) {
