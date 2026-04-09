@@ -115,6 +115,18 @@ pub trait MailMessages: Send + Sync {
         folder_name: &str,
     ) -> anyhow::Result<std::collections::HashSet<u32>>;
 
+    /// Update flags for a single message by UID. Emits MessagesUpdated if changed.
+    async fn update_flags(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+        is_read: bool,
+        is_flagged: bool,
+        is_answered: bool,
+        is_draft: bool,
+    ) -> anyhow::Result<bool>;
+
     /// Remove messages by UID. Emits MessagesRemoved.
     async fn delete_messages_by_uids(
         &self,

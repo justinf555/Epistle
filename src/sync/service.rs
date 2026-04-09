@@ -156,6 +156,24 @@ impl SyncEngine {
                         }
                     });
                 }
+                AppEvent::IdleFlagsChanged { account_id, folder_name, uid, is_read, is_flagged, is_answered, is_draft } => {
+                    let engine = Arc::clone(&engine);
+                    let account_id = account_id.clone();
+                    let folder_name = folder_name.clone();
+                    let uid = *uid;
+                    let is_read = *is_read;
+                    let is_flagged = *is_flagged;
+                    let is_answered = *is_answered;
+                    let is_draft = *is_draft;
+                    tokio::spawn(async move {
+                        if let Err(e) = engine.messages.update_flags(
+                            &account_id, &folder_name, uid,
+                            is_read, is_flagged, is_answered, is_draft,
+                        ).await {
+                            error!(uid, error = %e, "Failed to update flags from IDLE");
+                        }
+                    });
+                }
                 AppEvent::MessageBodyRequested { account_id, folder_name, uid } => {
                     let engine = Arc::clone(&engine);
                     let account_id = account_id.clone();
@@ -600,6 +618,55 @@ impl SyncEngine {
             new
             // guard dropped — connection returned to pool
         };
+
+        // ── Stage 1b: Flag Sync ─────────────────────────────────────────
+        // Fetch flags for all existing UIDs and update any that changed.
+        {
+            let mut guard = self.pool.acquire(account_id, config, max_conns).await?;
+            let session = guard.session();
+            session.select(folder_name).await?;
+
+            let fetches = match session.uid_fetch("1:*", "(UID FLAGS)").await {
+                Ok(f) => f,
+                Err(e) => {
+                    guard.poison();
+                    return Err(e.into());
+                }
+            };
+
+            let mut flag_updates = 0u32;
+            for fetch in &fetches {
+                if let Some(uid) = fetch.uid {
+                    let flags: Vec<String> = fetch
+                        .flags()
+                        .map(|f| match f {
+                            async_imap::types::Flag::Seen => "\\Seen".to_string(),
+                            async_imap::types::Flag::Answered => "\\Answered".to_string(),
+                            async_imap::types::Flag::Flagged => "\\Flagged".to_string(),
+                            async_imap::types::Flag::Draft => "\\Draft".to_string(),
+                            _ => String::new(),
+                        })
+                        .collect();
+
+                    let is_read = flags.iter().any(|f| f == "\\Seen");
+                    let is_flagged = flags.iter().any(|f| f == "\\Flagged");
+                    let is_answered = flags.iter().any(|f| f == "\\Answered");
+                    let is_draft = flags.iter().any(|f| f == "\\Draft");
+
+                    if let Ok(true) = self
+                        .messages
+                        .update_flags(account_id, folder_name, uid, is_read, is_flagged, is_answered, is_draft)
+                        .await
+                    {
+                        flag_updates += 1;
+                    }
+                }
+            }
+
+            if flag_updates > 0 {
+                debug!(account_id, folder_name, flag_updates, "Flag sync complete");
+            }
+        }
 
         if new_uids.is_empty() {
             return Ok(());

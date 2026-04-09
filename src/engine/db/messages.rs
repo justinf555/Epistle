@@ -292,6 +292,38 @@ impl Database {
         Ok(rows.into_iter().map(|(uid,)| uid as u32).collect())
     }
 
+    /// Update flags for a single message. Returns true if the row was changed.
+    pub async fn update_flags(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        uid: u32,
+        is_read: bool,
+        is_flagged: bool,
+        is_answered: bool,
+        is_draft: bool,
+    ) -> Result<bool, DbError> {
+        let result = sqlx::query(
+            "UPDATE messages SET is_read = ?, is_flagged = ?, is_answered = ?, is_draft = ?
+             WHERE account_id = ? AND folder_name = ? AND uid = ?
+             AND (is_read != ? OR is_flagged != ? OR is_answered != ? OR is_draft != ?)",
+        )
+        .bind(is_read)
+        .bind(is_flagged)
+        .bind(is_answered)
+        .bind(is_draft)
+        .bind(account_id)
+        .bind(folder_name)
+        .bind(uid)
+        .bind(is_read)
+        .bind(is_flagged)
+        .bind(is_answered)
+        .bind(is_draft)
+        .execute(self.pool())
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Delete messages by UID. Returns the number of rows deleted.
     pub async fn bulk_delete_by_uids(
         &self,

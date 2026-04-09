@@ -16,6 +16,8 @@ use std::time::Duration;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, warn};
 
+use async_imap::imap_proto::types::{AttributeValue, Response};
+
 use crate::app_event::AppEvent;
 use crate::event_bus::EventSender;
 use crate::goa::types::{AuthMethod, ImapConfig};
@@ -227,6 +229,13 @@ async fn run_idle_session<T>(
                     "IDLE notification received"
                 );
 
+                // Parse the notification to determine the appropriate action
+                let event = parse_idle_response(
+                    data.parsed(),
+                    account_id,
+                    folder_name,
+                );
+
                 session = match handle.done().await {
                     Ok(s) => s,
                     Err(e) => {
@@ -235,10 +244,7 @@ async fn run_idle_session<T>(
                     }
                 };
 
-                sender.send(AppEvent::IdleNotification {
-                    account_id: account_id.to_string(),
-                    folder_name: folder_name.to_string(),
-                });
+                sender.send(event);
             }
             Ok(async_imap::extensions::idle::IdleResponse::Timeout) => {
                 debug!(account_id, folder_name, "IDLE timeout, re-entering");
@@ -282,6 +288,53 @@ async fn poll_loop(
             account_id: account_id.to_string(),
             folder_name: folder_name.to_string(),
         });
+    }
+}
+
+/// Parse an IDLE notification into the appropriate AppEvent.
+///
+/// Fetch responses with UID + Flags are converted to `IdleFlagsChanged` for
+/// direct flag updates. Everything else (EXISTS, EXPUNGE) triggers a full
+/// `IdleNotification` → `sync_folder`.
+fn parse_idle_response(response: &Response<'_>, account_id: &str, folder_name: &str) -> AppEvent {
+    if let Response::Fetch(_seq, attrs) = response {
+        let mut uid = None;
+        let mut flags = Vec::new();
+        let mut has_flags = false;
+
+        for attr in attrs {
+            match attr {
+                AttributeValue::Uid(u) => uid = Some(*u),
+                AttributeValue::Flags(f) => {
+                    has_flags = true;
+                    flags = f.iter().map(|s: &std::borrow::Cow<'_, str>| s.to_string()).collect();
+                }
+                _ => {}
+            }
+        }
+
+        if let (Some(uid), true) = (uid, has_flags) {
+            let is_read = flags.iter().any(|f| f == "\\Seen");
+            let is_flagged = flags.iter().any(|f| f == "\\Flagged");
+            let is_answered = flags.iter().any(|f| f == "\\Answered");
+            let is_draft = flags.iter().any(|f| f == "\\Draft");
+
+            return AppEvent::IdleFlagsChanged {
+                account_id: account_id.to_string(),
+                folder_name: folder_name.to_string(),
+                uid,
+                is_read,
+                is_flagged,
+                is_answered,
+                is_draft,
+            };
+        }
+    }
+
+    // Default: trigger full differential sync
+    AppEvent::IdleNotification {
+        account_id: account_id.to_string(),
+        folder_name: folder_name.to_string(),
     }
 }
 
