@@ -1,3 +1,4 @@
+mod message_list;
 mod sidebar;
 mod window;
 
