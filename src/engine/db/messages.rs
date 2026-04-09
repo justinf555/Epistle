@@ -238,6 +238,26 @@ impl Database {
         Ok(rows)
     }
 
+    /// Get uuid, uid, and internal_date for messages since a cutoff date.
+    pub async fn list_messages_since(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        since: &str,
+    ) -> Result<Vec<(String, i64, Option<String>)>, DbError> {
+        let rows = sqlx::query_as::<_, (String, i64, Option<String>)>(
+            "SELECT uuid, uid, internal_date FROM messages
+             WHERE account_id = ? AND folder_name = ?
+             AND (internal_date >= ? OR internal_date IS NULL)",
+        )
+        .bind(account_id)
+        .bind(folder_name)
+        .bind(since)
+        .fetch_all(self.pool())
+        .await?;
+        Ok(rows)
+    }
+
     /// Get the UUID for a message by its IMAP UID.
     pub async fn get_uuid(
         &self,

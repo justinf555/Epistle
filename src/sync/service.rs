@@ -346,8 +346,55 @@ impl SyncEngine {
             }
         }
 
+        // Queue body prefetch for messages within the window that may be missing .eml files.
+        // The body worker will skip messages that already have files on disk.
+        if self.prefetch_days > 0 {
+            self.backfill_missing_bodies(&domain_accounts).await;
+        }
+
         info!("Initial sync complete");
         Ok(())
+    }
+
+    /// Queue body fetches for messages within the prefetch window that may be
+    /// missing .eml files (e.g., app was quit before prefetch completed).
+    /// The body worker checks disk before fetching, so duplicates are harmless.
+    async fn backfill_missing_bodies(&self, accounts: &[Account]) {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(self.prefetch_days as i64);
+        let cutoff_str = cutoff.to_rfc3339();
+        let mut queued = 0u32;
+
+        for account in accounts {
+            let folders = match self.folders.list_folders(&account.goa_id).await {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+
+            for folder in &folders {
+                let messages = match self
+                    .messages
+                    .list_messages_since(&account.goa_id, &folder.name, &cutoff_str)
+                    .await
+                {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+
+                for (uuid, uid, _date) in messages {
+                    let _ = self.body_background_tx.try_send(FetchBodyRequest {
+                        uid,
+                        uuid,
+                        account_id: account.goa_id.clone(),
+                        folder_name: folder.name.clone(),
+                    });
+                    queued += 1;
+                }
+            }
+        }
+
+        if queued > 0 {
+            info!(queued, prefetch_days = self.prefetch_days, "Queued body backfill");
+        }
     }
 
     /// Two-stage folder sync: ID sync (diff UIDs) then header fetch (envelopes).

@@ -161,6 +161,22 @@ impl MailMessages for MailMessagesImpl {
         Ok(rows.into_iter().map(row_to_message).collect())
     }
 
+    async fn list_messages_since(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        since: &str,
+    ) -> anyhow::Result<Vec<(String, u32, Option<String>)>> {
+        let rows = self
+            .db
+            .list_messages_since(account_id, folder_name, since)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(uuid, uid, date)| (uuid, uid as u32, date))
+            .collect())
+    }
+
     async fn get_uuid(
         &self,
         account_id: &str,

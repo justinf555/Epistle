@@ -100,6 +100,14 @@ pub trait MailMessages: Send + Sync {
         uid: u32,
     ) -> anyhow::Result<Option<String>>;
 
+    /// Get uuid, uid, and internal_date for messages in a folder since a cutoff date.
+    async fn list_messages_since(
+        &self,
+        account_id: &str,
+        folder_name: &str,
+        since: &str,
+    ) -> anyhow::Result<Vec<(String, u32, Option<String>)>>;
+
     /// Get all UIDs for a folder (for differential sync).
     async fn list_local_uids(
         &self,
