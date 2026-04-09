@@ -46,7 +46,6 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             let window = self.obj();
-            window.setup_sidebar();
             window.setup_sidebar_toggle();
         }
     }
@@ -75,19 +74,18 @@ impl EpistleWindow {
         self.imp().sidebar.get().expect("sidebar initialized")
     }
 
-    /// Pass engine trait objects to child components.
-    /// The sidebar will use root() to subscribe to events and load cached data.
+    /// Pass engine trait objects to child components, then parent the sidebar.
+    ///
+    /// The sidebar receives its engine references first, then gets added to the
+    /// split view — which triggers root(), where it subscribes to events and
+    /// loads cached data.
     pub fn set_engine(&self, accounts: Arc<dyn MailAccounts>, folders: Arc<dyn MailFolders>) {
-        self.sidebar().set_engine(accounts, folders);
-    }
-
-    fn setup_sidebar(&self) {
         let sidebar = EpistleSidebar::new();
+        sidebar.set_engine(accounts, folders);
+
+        // Parenting triggers root() — sidebar is now fully wired
         self.imp().outer_split.set_sidebar(Some(&sidebar));
-        self.imp()
-            .sidebar
-            .set(sidebar)
-            .expect("sidebar set once");
+        self.imp().sidebar.set(sidebar).expect("sidebar set once");
     }
 
     fn setup_sidebar_toggle(&self) {
